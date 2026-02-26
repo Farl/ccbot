@@ -23,6 +23,7 @@ import time
 from telegram import Bot
 from telegram.error import BadRequest
 
+from ..config import config
 from ..session import session_manager
 from ..terminal_parser import is_interactive_ui, parse_status_line
 from ..tmux_manager import tmux_manager
@@ -90,7 +91,7 @@ async def update_status_message(
     # Normal status line check
     status_line = parse_status_line(pane_text)
 
-    if status_line:
+    if status_line and config.show_status:
         await enqueue_status_update(
             bot,
             user_id,
@@ -98,7 +99,7 @@ async def update_status_message(
             status_line,
             thread_id=thread_id,
         )
-    # If no status line, keep existing status message (don't clear on transient state)
+    # If no status line (or disabled), keep existing status message
 
 
 async def status_poll_loop(bot: Bot) -> None:

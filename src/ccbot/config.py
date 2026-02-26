@@ -81,14 +81,18 @@ class Config:
 
         self.monitor_poll_interval = float(os.getenv("MONITOR_POLL_INTERVAL", "2.0"))
 
-        # Display user messages in history and real-time notifications
-        # When True, user messages are shown with a 👤 prefix
-        self.show_user_messages = True
+        # Notification filters (all default to True)
+        def _env_bool(key: str, default: str = "true") -> bool:
+            return os.getenv(key, default).lower() == "true"
+
+        self.show_user_messages = _env_bool("CCBOT_SHOW_USER_MESSAGES")
+        self.show_thinking = _env_bool("CCBOT_SHOW_THINKING")
+        self.show_tool_use = _env_bool("CCBOT_SHOW_TOOL_USE")
+        self.show_tool_result = _env_bool("CCBOT_SHOW_TOOL_RESULT")
+        self.show_status = _env_bool("CCBOT_SHOW_STATUS")
 
         # Show hidden (dot) directories in directory browser
-        self.show_hidden_dirs = (
-            os.getenv("CCBOT_SHOW_HIDDEN_DIRS", "").lower() == "true"
-        )
+        self.show_hidden_dirs = _env_bool("CCBOT_SHOW_HIDDEN_DIRS", "false")
 
         logger.debug(
             "Config initialized: dir=%s, token=%s..., allowed_users=%d, "

@@ -348,8 +348,16 @@ class SessionMonitor:
                 for entry in parsed_entries:
                     if not entry.text and not entry.image_data:
                         continue
-                    # Skip user messages unless show_user_messages is enabled
+                    # Notification filters
                     if entry.role == "user" and not config.show_user_messages:
+                        continue
+                    if entry.content_type == "thinking" and not config.show_thinking:
+                        continue
+                    if entry.content_type == "tool_use" and not config.show_tool_use:
+                        continue
+                    if entry.content_type == "tool_result" and (
+                        not config.show_tool_result or not config.show_tool_use
+                    ):
                         continue
                     new_messages.append(
                         NewMessage(

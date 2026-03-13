@@ -37,6 +37,7 @@ from .handlers.directory_browser import (
     get_browse_state,
     get_session_picker_state,
 )
+from .handlers.commands import dispatch_command, parse_text_command
 from .handlers.interactive_ui import ACTION_NAV_PREFIX, handle_interactive_ui
 from .handlers.message_queue import build_response_parts, enqueue_content_message, shutdown_workers
 from .handlers.status_polling import record_content_delivery, start_status_polling
@@ -211,18 +212,21 @@ def _register_handlers(slack_app: AsyncApp) -> None:
 
     # --- Message handler for all DMs (assistant and non-assistant) ---
     @slack_app.event("message")
-    async def handle_message(
-        event: dict[str, Any],
-        say: Any,
-        client: Any,
-    ) -> None:
+    async def handle_message(event: dict[str, Any], say: Any, client: Any) -> None:
         if event.get("bot_id") is not None or event.get("subtype") == "bot_message":
             return
-
         user_id: str = event.get("user", "")
         channel: str = event.get("channel", "")
         thread_ts: str = event.get("thread_ts") or event.get("ts", "")
         text: str = event.get("text", "")
+
+        # Intercept text commands before forwarding to Claude
+        parsed = parse_text_command(text)
+        if parsed:
+            cmd, args = parsed
+            handled = await dispatch_command(client, user_id, channel, thread_ts, cmd, args)
+            if handled:
+                return
 
         await _handle_user_message(user_id, channel, thread_ts, text, client, say)
 
@@ -429,6 +433,39 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                 await handle_interactive_ui(
                     client, user_id, thread_ts, window_id, channel_id, pane_text
                 )
+
+    @slack_app.command("/esc")
+    async def slash_esc(ack: Any, body: dict[str, Any], client: Any) -> None:
+        await ack()
+        await dispatch_command(
+            client, body["user_id"], body["channel_id"],
+            body.get("thread_ts", ""), "esc", [],
+        )
+
+    @slack_app.command("/unbind")
+    async def slash_unbind(ack: Any, body: dict[str, Any], client: Any) -> None:
+        await ack()
+        await dispatch_command(
+            client, body["user_id"], body["channel_id"],
+            body.get("thread_ts", ""), "unbind", [],
+        )
+
+    @slack_app.command("/screenshot")
+    async def slash_screenshot(ack: Any, body: dict[str, Any], client: Any) -> None:
+        await ack()
+        await dispatch_command(
+            client, body["user_id"], body["channel_id"],
+            body.get("thread_ts", ""), "screenshot", [],
+        )
+
+    @slack_app.command("/history")
+    async def slash_history(ack: Any, body: dict[str, Any], client: Any) -> None:
+        await ack()
+        args = body.get("text", "").split()
+        await dispatch_command(
+            client, body["user_id"], body["channel_id"],
+            body.get("thread_ts", ""), "history", args,
+        )
 
 
 async def handle_new_message(msg: NewMessage) -> None:

@@ -467,6 +467,27 @@ def _register_handlers(slack_app: AsyncApp) -> None:
             body.get("thread_ts", ""), "history", args,
         )
 
+    @slack_app.action(re.compile(r"^hist_"))
+    async def handle_hist_action(ack: Any, body: dict[str, Any], client: Any) -> None:
+        await ack()
+        action = body["actions"][0]
+        action_id: str = action["action_id"]
+        channel: str = body["channel"]["id"]
+        message_ts: str = body["message"]["ts"]
+        thread_ts: str = body["message"].get("thread_ts", "")
+        user_id: str = body["user"]["id"]
+
+        from .handlers.history import parse_history_action_id, send_history
+        try:
+            page, window_id = parse_history_action_id(action_id)
+        except (ValueError, IndexError):
+            return
+
+        await send_history(
+            client, user_id, channel, thread_ts, window_id,
+            page=page, edit_ts=message_ts,
+        )
+
 
 async def handle_new_message(msg: NewMessage) -> None:
     """Session monitor callback — deliver Claude messages to Slack threads."""

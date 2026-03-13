@@ -151,5 +151,5 @@ async def _cmd_history(
     if not window_id:
         await send_message(client, channel, "No active session in this thread.", thread_ts=thread_ts)
         return
-    from .history import send_history  # type: ignore[import]
+    from .history import send_history
     await send_history(client, user_id, channel, thread_ts, window_id, page=page)

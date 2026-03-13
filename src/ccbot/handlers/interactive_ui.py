@@ -45,6 +45,11 @@ _interactive_msgs: dict[tuple[int, int], int] = {}
 # Track interactive mode: (user_id, thread_id_or_0) -> window_id
 _interactive_mode: dict[tuple[int, int], str] = {}
 
+# Grace period: consecutive non-detection count before clearing
+# Prevents flickering when pane capture intermittently misses the UI
+CLEAR_GRACE_MISSES = 3
+_miss_counts: dict[tuple[int, int], int] = {}
+
 
 def get_interactive_window(user_id: int, thread_id: int | None = None) -> str | None:
     """Get the window_id for user's interactive mode."""

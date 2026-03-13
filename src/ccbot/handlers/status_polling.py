@@ -28,6 +28,8 @@ from ..session import session_manager
 from ..terminal_parser import is_interactive_ui, parse_status_line
 from ..tmux_manager import tmux_manager
 from .interactive_ui import (
+    CLEAR_GRACE_MISSES,
+    _miss_counts,
     clear_interactive_msg,
     get_interactive_window,
     handle_interactive_ui,
@@ -76,19 +78,28 @@ async def update_status_message(
 
     interactive_window = get_interactive_window(user_id, thread_id)
     should_check_new_ui = True
+    ikey = (user_id, thread_id or 0)
 
     if interactive_window == window_id:
         # User is in interactive mode for THIS window
         if is_interactive_ui(pane_text):
             # Interactive UI still showing — skip status update (user is interacting)
+            _miss_counts.pop(ikey, None)  # reset miss counter
             return
-        # Interactive UI gone — clear interactive mode, fall through to status check.
-        # Don't re-check for new UI this cycle (the old one just disappeared).
+        # UI not detected this cycle — apply grace period before clearing
+        miss = _miss_counts.get(ikey, 0) + 1
+        _miss_counts[ikey] = miss
+        if miss < CLEAR_GRACE_MISSES:
+            # Not enough consecutive misses — keep the message, skip this cycle
+            return
+        # Grace period exceeded — clear interactive mode
+        _miss_counts.pop(ikey, None)
         await clear_interactive_msg(user_id, bot, thread_id)
         should_check_new_ui = False
     elif interactive_window is not None:
         # User is in interactive mode for a DIFFERENT window (window switched)
         # Clear stale interactive mode
+        _miss_counts.pop(ikey, None)
         await clear_interactive_msg(user_id, bot, thread_id)
 
     # Check for permission prompt (interactive UI not triggered via JSONL)

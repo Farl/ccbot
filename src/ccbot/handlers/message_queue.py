@@ -392,54 +392,24 @@ async def _convert_status_to_content(
     window_id: str,
     content_text: str,
 ) -> int | None:
-    """Convert status message to content message by editing it.
+    """Delete status message so content is sent as a new message.
 
-    Returns the message_id if converted successfully, None otherwise.
+    Always returns None so the caller sends a new message, ensuring the user
+    gets a Telegram notification. (Editing a status message into content is
+    silent — Telegram does not notify on edits.)
     """
     skey = (user_id, thread_id_or_0)
     info = _status_msg_info.pop(skey, None)
     if not info:
         return None
 
-    msg_id, stored_wid, _ = info
+    msg_id, _stored_wid, _ = info
     chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
-    if stored_wid != window_id:
-        # Different window, just delete the old status
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception:
-            pass
-        return None
-
-    # Edit status message to show content
     try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=msg_id,
-            text=_ensure_formatted(content_text),
-            parse_mode=PARSE_MODE,
-            link_preview_options=NO_LINK_PREVIEW,
-        )
-        return msg_id
-    except RetryAfter:
-        raise
+        await bot.delete_message(chat_id=chat_id, message_id=msg_id)
     except Exception:
-        try:
-            # Fallback to plain text with sentinels stripped
-            plain = strip_sentinels(content_text)
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=plain,
-                link_preview_options=NO_LINK_PREVIEW,
-            )
-            return msg_id
-        except RetryAfter:
-            raise
-        except Exception as e:
-            logger.debug(f"Failed to convert status to content: {e}")
-            # Message might be deleted or too old, caller will send new message
-            return None
+        pass
+    return None  # Always send content as new message for notification
 
 
 async def _process_status_update_task(

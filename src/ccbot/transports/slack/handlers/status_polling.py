@@ -10,6 +10,7 @@ Key state:
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 
 from slack_sdk.web.async_client import AsyncWebClient
@@ -31,8 +32,26 @@ logger = logging.getLogger(__name__)
 
 STATUS_POLL_INTERVAL = 1.0  # seconds
 
+# Seconds to suppress new interactive UI after the last session monitor delivery.
+# Gives the session monitor time to flush all pending tool/response messages first.
+_CONTENT_SETTLE_TIME = 3.0
+
+# (user_id, thread_ts) -> monotonic time of last content delivery
+_last_content_time: dict[tuple[str, str], float] = {}
+
 # (user_id, thread_ts) -> (msg_ts, window_id, last_text)
 _status_msgs: dict[tuple[str, str], tuple[str, str, str]] = {}
+
+
+def record_content_delivery(user_id: str, thread_ts: str) -> None:
+    """Called by handle_new_message to signal content was just delivered."""
+    _last_content_time[(user_id, thread_ts)] = time.monotonic()
+
+
+def _is_content_settling(user_id: str, thread_ts: str) -> bool:
+    """True if content was recently delivered — more messages may be in flight."""
+    t = _last_content_time.get((user_id, thread_ts), 0.0)
+    return (time.monotonic() - t) < _CONTENT_SETTLE_TIME
 
 
 async def update_status_for_window(
@@ -60,7 +79,11 @@ async def update_status_for_window(
     if interactive_window == window_id:
         if is_interactive_ui(pane_text):
             _grace_counters.pop(ikey, None)  # Reset miss counter
-            return  # Still in interactive mode
+            # Update display in case user navigated (content may have changed)
+            await handle_interactive_ui(
+                client, user_id, thread_ts, window_id, channel, pane_text
+            )
+            return
         # UI not detected — apply grace period before clearing
         miss = _grace_counters.get(ikey, 0) + 1
         _grace_counters[ikey] = miss
@@ -75,6 +98,10 @@ async def update_status_for_window(
         await clear_interactive_msg(client, user_id, thread_ts, channel)
 
     if should_check_new_ui and is_interactive_ui(pane_text):
+        if _is_content_settling(user_id, thread_ts):
+            # Content was just delivered — wait for session monitor to flush remaining
+            # messages before posting the interactive UI on top of them.
+            return
         logger.debug(
             "Interactive UI detected in polling (user=%s, window=%s)",
             user_id,
@@ -86,7 +113,11 @@ async def update_status_for_window(
         return
 
     status_line = parse_status_line(pane_text)
-    if not status_line or not config.show_status:
+    if not status_line:
+        # Claude may have exited — clear any stale status message
+        await clear_status(user_id, thread_ts, client, channel)
+        return
+    if not config.show_status:
         return
 
     skey = (user_id, thread_ts)
@@ -112,9 +143,10 @@ async def clear_status(
     client: AsyncWebClient,
     channel: str,
 ) -> None:
-    """Remove status message for a user/thread."""
-    skey = (user_id, thread_ts)
-    existing = _status_msgs.pop(skey, None)
+    """Remove status message and delivery tracking for a user/thread."""
+    key = (user_id, thread_ts)
+    _last_content_time.pop(key, None)
+    existing = _status_msgs.pop(key, None)
     if existing:
         msg_ts, _wid, _text = existing
         await delete_message(client, channel, msg_ts)

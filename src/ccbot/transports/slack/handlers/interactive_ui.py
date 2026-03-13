@@ -36,6 +36,9 @@ _interactive_mode: dict[tuple[str, str], str] = {}
 # (user_id, thread_ts) -> consecutive miss count
 _grace_counters: dict[tuple[str, str], int] = {}
 
+# (user_id, thread_ts) -> last displayed content (for dedup)
+_interactive_last_content: dict[tuple[str, str], str] = {}
+
 
 def get_interactive_window(user_id: str, thread_ts: str) -> str | None:
     """Get the window_id for user's interactive mode."""
@@ -109,14 +112,19 @@ async def handle_interactive_ui(
 
     existing_ts = _interactive_msgs.get(ikey)
     if existing_ts:
+        # Dedup: skip edit if content hasn't changed
+        if _interactive_last_content.get(ikey) == content.content:
+            return True
         ok = await edit_message(
             client, channel, existing_ts, content.content, blocks=blocks
         )
         if ok:
             _interactive_mode[ikey] = window_id
+            _interactive_last_content[ikey] = content.content
             return True
         # Edit failed — send new message
         _interactive_msgs.pop(ikey, None)
+        _interactive_last_content.pop(ikey, None)
 
     ts = await send_message(
         client, channel, content.content, thread_ts=thread_ts, blocks=blocks
@@ -124,6 +132,7 @@ async def handle_interactive_ui(
     if ts:
         _interactive_msgs[ikey] = ts
         _interactive_mode[ikey] = window_id
+        _interactive_last_content[ikey] = content.content
         return True
     return False
 
@@ -139,5 +148,6 @@ async def clear_interactive_msg(
     msg_ts = _interactive_msgs.pop(ikey, None)
     _interactive_mode.pop(ikey, None)
     _grace_counters.pop(ikey, None)
+    _interactive_last_content.pop(ikey, None)
     if msg_ts:
         await delete_message(client, channel, msg_ts)

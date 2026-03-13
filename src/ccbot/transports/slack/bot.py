@@ -19,7 +19,7 @@ from slack_bolt.async_app import AsyncApp, AsyncAssistant
 from ...config import config
 from ...session import session_manager
 from ...session_monitor import NewMessage, SessionMonitor
-from ...tmux_manager import tmux_manager
+from ...tmux_manager import TmuxWindow, tmux_manager
 from .handlers.directory_browser import (
     ACTION_DIR_CANCEL,
     ACTION_DIR_CONFIRM,
@@ -33,7 +33,7 @@ from .handlers.directory_browser import (
 )
 from .handlers.interactive_ui import ACTION_NAV_PREFIX, handle_interactive_ui
 from .handlers.message_sender import send_long_message
-from .handlers.status_polling import start_status_polling
+from .handlers.status_polling import record_content_delivery, start_status_polling
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,26 @@ async def _resolve_dm_channel(user_id: str) -> str | None:
         return None
 
 
+_IDLE_SHELLS: frozenset[str] = frozenset({"bash", "zsh", "sh", "fish", ""})
+
+
+def _is_claude_running(window: TmuxWindow) -> bool:
+    """Return True if Claude Code is the foreground process in the window."""
+    return window.pane_current_command not in _IDLE_SHELLS
+
+
+async def _restart_claude_in_window(window: TmuxWindow) -> None:
+    """Restart Claude Code in an existing tmux window.
+
+    Sends unset CLAUDECODE + claude command, then waits up to 10s for
+    session_map to register the new session.
+    """
+    await tmux_manager.send_keys(window.window_id, "unset CLAUDECODE", enter=True)
+    await tmux_manager.send_keys(window.window_id, config.claude_command, enter=True)
+    logger.info("Restarting Claude in window %s", window.window_id)
+    await session_manager.wait_for_session_map_entry(window.window_id, timeout=10.0)
+
+
 async def _handle_user_message(
     user_id: str,
     channel: str,
@@ -85,11 +105,27 @@ async def _handle_user_message(
         dict(session_manager.thread_bindings.get(user_id, {})),
     )
     if window_id:
-        # Thread is bound — forward message to Claude Code
-        success, msg = await session_manager.send_to_window(window_id, text)
-        if not success:
-            await say(text=f"Failed: {msg}", channel=channel, thread_ts=thread_ts)
-        return
+        # Thread is bound — check window is alive before forwarding
+        window = await tmux_manager.find_window_by_id(window_id)
+        if not window:
+            # Window died — unbind and fall through to directory browser
+            logger.info(
+                "Window %s no longer exists for user=%s thread=%s, unbinding",
+                window_id, user_id, thread_ts,
+            )
+            session_manager.unbind_thread(user_id, thread_ts)
+        else:
+            # Window alive — check if Claude is still running, restart if not
+            if not _is_claude_running(window):
+                logger.info(
+                    "Claude not running in window %s, restarting for user=%s",
+                    window_id, user_id,
+                )
+                await _restart_claude_in_window(window)
+            success, msg = await session_manager.send_to_window(window_id, text)
+            if not success:
+                await say(text=f"Failed: {msg}", channel=channel, thread_ts=thread_ts)
+            return
 
     # No session for this thread — show directory browser
     logger.debug(
@@ -107,7 +143,7 @@ async def _handle_user_message(
         # Re-build with msg_ts so action callbacks can find the state
         msg_ts = resp.get("ts", "")
         if msg_ts:
-            build_directory_browser(user_id, msg_ts=msg_ts)
+            build_directory_browser(user_id, msg_ts=msg_ts, pending_text=text)
         logger.debug("Directory browser sent: ts=%s", msg_ts)
     except Exception as e:
         logger.error("Failed to send directory browser: %s", e)
@@ -154,7 +190,10 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         )
 
         await set_status(status="processing...")
-        await _handle_user_message(user_id, channel, thread_ts, text, client, say)
+        try:
+            await _handle_user_message(user_id, channel, thread_ts, text, client, say)
+        finally:
+            await set_status("")
 
     slack_app.assistant(assistant)
 
@@ -229,6 +268,7 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                 )
                 logger.info("chat_update ok=%s for %s", resp.get("ok"), action_id)
             elif action_id == ACTION_DIR_CONFIRM:
+                pending_text = state.get("pending_text")
                 clear_browse_state(user_id, msg_ts=message_ts)
                 effective_ts = thread_ts
                 if not effective_ts:
@@ -247,6 +287,12 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                         text=f"\u2705 Session created: {current_path.name}",
                         blocks=[],
                     )
+                    if pending_text:
+                        send_ok, send_msg = await session_manager.send_to_window(
+                            window_id, pending_text
+                        )
+                        if not send_ok:
+                            logger.warning("Failed to forward pending text: %s", send_msg)
                 else:
                     await client.chat_update(
                         channel=channel,
@@ -314,7 +360,9 @@ async def handle_new_message(msg: NewMessage) -> None:
         if not channel:
             continue
         assert app is not None
-        await send_long_message(app.client, channel, msg.text, thread_ts=thread_id)
+        record_content_delivery(user_id, thread_id)
+        text = f"👤 {msg.text}" if msg.role == "user" else msg.text
+        await send_long_message(app.client, channel, text, thread_ts=thread_id)
 
 
 def run_slack_bot() -> None:

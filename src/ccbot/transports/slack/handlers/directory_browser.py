@@ -64,11 +64,13 @@ def build_directory_browser(
     path: Path | None = None,
     page: int = 0,
     msg_ts: str | None = None,
+    pending_text: str | None = None,
 ) -> dict[str, Any]:
     """Build directory browser UI with Block Kit blocks.
 
     Returns dict with 'text' (fallback) and 'blocks' keys.
     If msg_ts is provided, state is keyed by message ts for reliable lookup.
+    pending_text is the original user message to forward after session creation.
     """
     if path is None:
         path = Path.home()
@@ -96,6 +98,7 @@ def build_directory_browser(
         "dirs": subdirs,
         "page": page,
         "user_id": user_id,
+        "pending_text": pending_text,
     }
     key = msg_ts if msg_ts else user_id
     _browse_states[key] = state

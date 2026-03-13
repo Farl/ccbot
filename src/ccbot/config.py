@@ -1,7 +1,7 @@
 """Application configuration — reads env vars and exposes a singleton.
 
-Loads TELEGRAM_BOT_TOKEN, ALLOWED_USERS, tmux/Claude paths, and
-monitoring intervals from environment variables (with .env support).
+Loads transport tokens (Telegram/Slack), ALLOWED_USERS, tmux/Claude paths,
+and monitoring intervals from environment variables (with .env support).
 .env loading priority: local .env (cwd) > $CCBOT_DIR/.env (default ~/.ccbot).
 The module-level `config` instance is imported by nearly every other module.
 
@@ -19,7 +19,13 @@ from .utils import ccbot_dir
 logger = logging.getLogger(__name__)
 
 # Env vars that must not leak to child processes (e.g. Claude Code via tmux)
-SENSITIVE_ENV_VARS = {"TELEGRAM_BOT_TOKEN", "ALLOWED_USERS", "OPENAI_API_KEY"}
+SENSITIVE_ENV_VARS = {
+    "TELEGRAM_BOT_TOKEN",
+    "ALLOWED_USERS",
+    "OPENAI_API_KEY",
+    "SLACK_BOT_TOKEN",
+    "SLACK_APP_TOKEN",
+}
 
 
 class Config:
@@ -40,22 +46,18 @@ class Config:
             load_dotenv(global_env)
             logger.debug("Loaded env from %s", global_env)
 
+        # Transport tokens (validated at startup in main.py, not here)
         self.telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN") or ""
-        if not self.telegram_bot_token:
-            raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
+        self.slack_bot_token: str = os.getenv("SLACK_BOT_TOKEN") or ""
+        self.slack_app_token: str = os.getenv("SLACK_APP_TOKEN") or ""
 
         allowed_users_str = os.getenv("ALLOWED_USERS", "")
         if not allowed_users_str:
             raise ValueError("ALLOWED_USERS environment variable is required")
-        try:
-            self.allowed_users: set[int] = {
-                int(uid.strip()) for uid in allowed_users_str.split(",") if uid.strip()
-            }
-        except ValueError as e:
-            raise ValueError(
-                f"ALLOWED_USERS contains non-numeric value: {e}. "
-                "Expected comma-separated Telegram user IDs."
-            ) from e
+        # Store as strings to support both Telegram int IDs and Slack string IDs
+        self.allowed_users: set[str] = {
+            uid.strip() for uid in allowed_users_str.split(",") if uid.strip()
+        }
 
         # Tmux session name and window naming
         self.tmux_session_name = os.getenv("TMUX_SESSION_NAME", "ccbot")
@@ -109,18 +111,19 @@ class Config:
             os.environ.pop(var, None)
 
         logger.debug(
-            "Config initialized: dir=%s, token=%s..., allowed_users=%d, "
-            "tmux_session=%s, claude_projects_path=%s",
+            "Config initialized: dir=%s, telegram_token=%s, slack_token=%s, "
+            "allowed_users=%d, tmux_session=%s, claude_projects_path=%s",
             self.config_dir,
-            self.telegram_bot_token[:8],
+            self.telegram_bot_token[:8] if self.telegram_bot_token else "(none)",
+            self.slack_bot_token[:8] if self.slack_bot_token else "(none)",
             len(self.allowed_users),
             self.tmux_session_name,
             self.claude_projects_path,
         )
 
-    def is_user_allowed(self, user_id: int) -> bool:
+    def is_user_allowed(self, user_id: int | str) -> bool:
         """Check if a user is in the allowed list."""
-        return user_id in self.allowed_users
+        return str(user_id) in self.allowed_users
 
 
 config = Config()

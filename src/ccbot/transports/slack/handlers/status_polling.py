@@ -19,6 +19,8 @@ from ....session import session_manager
 from ....terminal_parser import is_interactive_ui, parse_status_line
 from ....tmux_manager import tmux_manager
 from .interactive_ui import (
+    CLEAR_GRACE_MISSES,
+    _grace_counters,
     clear_interactive_msg,
     get_interactive_window,
     handle_interactive_ui,
@@ -53,12 +55,23 @@ async def update_status_for_window(
     interactive_window = get_interactive_window(user_id, thread_ts)
     should_check_new_ui = True
 
+    ikey = (user_id, thread_ts)
+
     if interactive_window == window_id:
         if is_interactive_ui(pane_text):
+            _grace_counters.pop(ikey, None)  # Reset miss counter
             return  # Still in interactive mode
+        # UI not detected — apply grace period before clearing
+        miss = _grace_counters.get(ikey, 0) + 1
+        _grace_counters[ikey] = miss
+        if miss < CLEAR_GRACE_MISSES:
+            return  # Not enough consecutive misses yet
+        # Grace period exceeded — clear interactive mode
+        _grace_counters.pop(ikey, None)
         await clear_interactive_msg(client, user_id, thread_ts, channel)
         should_check_new_ui = False
     elif interactive_window is not None:
+        _grace_counters.pop(ikey, None)
         await clear_interactive_msg(client, user_id, thread_ts, channel)
 
     if should_check_new_ui and is_interactive_ui(pane_text):

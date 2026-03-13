@@ -186,3 +186,24 @@ async def start_status_polling(
             logger.error("Status poll loop error: %s", e)
 
         await asyncio.sleep(STATUS_POLL_INTERVAL)
+
+
+def take_status_ts(user_id: str, thread_ts: str) -> str | None:
+    """Return and remove the current status message ts for a thread.
+
+    Called by the queue worker when converting a status message to content
+    (edit in-place). Returns None if no status message is tracked.
+    """
+    key = (user_id, thread_ts)
+    existing = _status_msgs.pop(key, None)
+    if existing:
+        msg_ts, _wid, _text = existing
+        return msg_ts
+    return None
+
+
+def register_status_ts(
+    user_id: str, thread_ts: str, msg_ts: str, window_id: str, text: str
+) -> None:
+    """Register a newly-sent status message ts (called by queue worker after send)."""
+    _status_msgs[(user_id, thread_ts)] = (msg_ts, window_id, text)

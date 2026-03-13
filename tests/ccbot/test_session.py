@@ -14,23 +14,23 @@ def mgr(monkeypatch) -> SessionManager:
 
 class TestThreadBindings:
     def test_bind_and_get(self, mgr: SessionManager) -> None:
-        mgr.bind_thread(100, 1, "@1")
-        assert mgr.get_window_for_thread(100, 1) == "@1"
+        mgr.bind_thread("100", "1", "@1")
+        assert mgr.get_window_for_thread("100", "1") == "@1"
 
     def test_bind_unbind_get_returns_none(self, mgr: SessionManager) -> None:
-        mgr.bind_thread(100, 1, "@1")
-        mgr.unbind_thread(100, 1)
-        assert mgr.get_window_for_thread(100, 1) is None
+        mgr.bind_thread("100", "1", "@1")
+        mgr.unbind_thread("100", "1")
+        assert mgr.get_window_for_thread("100", "1") is None
 
     def test_unbind_nonexistent_returns_none(self, mgr: SessionManager) -> None:
-        assert mgr.unbind_thread(100, 999) is None
+        assert mgr.unbind_thread("100", "999") is None
 
     def test_iter_thread_bindings(self, mgr: SessionManager) -> None:
-        mgr.bind_thread(100, 1, "@1")
-        mgr.bind_thread(100, 2, "@2")
-        mgr.bind_thread(200, 3, "@3")
+        mgr.bind_thread("100", "1", "@1")
+        mgr.bind_thread("100", "2", "@2")
+        mgr.bind_thread("200", "3", "@3")
         result = set(mgr.iter_thread_bindings())
-        assert result == {(100, 1, "@1"), (100, 2, "@2"), (200, 3, "@3")}
+        assert result == {("100", "1", "@1"), ("100", "2", "@2"), ("200", "3", "@3")}
 
 
 class TestGroupChatId:
@@ -45,48 +45,48 @@ class TestGroupChatId:
 
     def test_resolve_with_stored_group_id(self, mgr: SessionManager) -> None:
         """resolve_chat_id returns stored group chat_id for known thread."""
-        mgr.set_group_chat_id(100, 1, -1001234567890)
-        assert mgr.resolve_chat_id(100, 1) == -1001234567890
+        mgr.set_group_chat_id("100", "1", -1001234567890)
+        assert mgr.resolve_chat_id("100", "1") == -1001234567890
 
     def test_resolve_without_group_id_falls_back_to_user_id(
         self, mgr: SessionManager
     ) -> None:
-        """resolve_chat_id falls back to user_id when no group_id stored."""
-        assert mgr.resolve_chat_id(100, 1) == 100
+        """resolve_chat_id falls back to int(user_id) when no group_id stored."""
+        assert mgr.resolve_chat_id("100", "1") == 100
 
     def test_resolve_none_thread_id_falls_back_to_user_id(
         self, mgr: SessionManager
     ) -> None:
-        """resolve_chat_id returns user_id when thread_id is None (private chat)."""
-        mgr.set_group_chat_id(100, 1, -1001234567890)
-        assert mgr.resolve_chat_id(100) == 100
+        """resolve_chat_id returns int(user_id) when thread_id is None (private chat)."""
+        mgr.set_group_chat_id("100", "1", -1001234567890)
+        assert mgr.resolve_chat_id("100") == 100
 
     def test_set_group_chat_id_overwrites(self, mgr: SessionManager) -> None:
         """set_group_chat_id updates the stored value on change."""
-        mgr.set_group_chat_id(100, 1, -999)
-        mgr.set_group_chat_id(100, 1, -888)
-        assert mgr.resolve_chat_id(100, 1) == -888
+        mgr.set_group_chat_id("100", "1", -999)
+        mgr.set_group_chat_id("100", "1", -888)
+        assert mgr.resolve_chat_id("100", "1") == -888
 
     def test_multiple_threads_independent(self, mgr: SessionManager) -> None:
         """Different threads for the same user store independent group chat_ids."""
-        mgr.set_group_chat_id(100, 1, -111)
-        mgr.set_group_chat_id(100, 2, -222)
-        assert mgr.resolve_chat_id(100, 1) == -111
-        assert mgr.resolve_chat_id(100, 2) == -222
+        mgr.set_group_chat_id("100", "1", -111)
+        mgr.set_group_chat_id("100", "2", -222)
+        assert mgr.resolve_chat_id("100", "1") == -111
+        assert mgr.resolve_chat_id("100", "2") == -222
 
     def test_multiple_users_independent(self, mgr: SessionManager) -> None:
         """Different users store independent group chat_ids."""
-        mgr.set_group_chat_id(100, 1, -111)
-        mgr.set_group_chat_id(200, 1, -222)
-        assert mgr.resolve_chat_id(100, 1) == -111
-        assert mgr.resolve_chat_id(200, 1) == -222
+        mgr.set_group_chat_id("100", "1", -111)
+        mgr.set_group_chat_id("200", "1", -222)
+        assert mgr.resolve_chat_id("100", "1") == -111
+        assert mgr.resolve_chat_id("200", "1") == -222
 
     def test_set_group_chat_id_with_none_thread(self, mgr: SessionManager) -> None:
-        """set_group_chat_id handles None thread_id (mapped to 0)."""
-        mgr.set_group_chat_id(100, None, -999)
-        # thread_id=None in resolve falls back to user_id (by design)
-        assert mgr.resolve_chat_id(100, None) == 100
-        # The stored key is "100:0", only accessible with explicit thread_id=0
+        """set_group_chat_id handles None thread_id (mapped to '0')."""
+        mgr.set_group_chat_id("100", None, -999)
+        # thread_id=None in resolve falls back to int(user_id) (by design)
+        assert mgr.resolve_chat_id("100", None) == 100
+        # The stored key is "100:0", only accessible with explicit thread_id="0"
         assert mgr.group_chat_ids.get("100:0") == -999
 
 
@@ -110,14 +110,14 @@ class TestWindowState:
 
 class TestResolveWindowForThread:
     def test_none_thread_id_returns_none(self, mgr: SessionManager) -> None:
-        assert mgr.resolve_window_for_thread(100, None) is None
+        assert mgr.resolve_window_for_thread("100", None) is None
 
     def test_unbound_thread_returns_none(self, mgr: SessionManager) -> None:
-        assert mgr.resolve_window_for_thread(100, 42) is None
+        assert mgr.resolve_window_for_thread("100", "42") is None
 
     def test_bound_thread_returns_window(self, mgr: SessionManager) -> None:
-        mgr.bind_thread(100, 42, "@3")
-        assert mgr.resolve_window_for_thread(100, 42) == "@3"
+        mgr.bind_thread("100", "42", "@3")
+        assert mgr.resolve_window_for_thread("100", "42") == "@3"
 
 
 class TestDisplayNames:
@@ -126,20 +126,20 @@ class TestDisplayNames:
         assert mgr.get_display_name("@99") == "@99"
 
     def test_set_and_get_display_name(self, mgr: SessionManager) -> None:
-        mgr.bind_thread(100, 1, "@1", window_name="myproject")
+        mgr.bind_thread("100", "1", "@1", window_name="myproject")
         assert mgr.get_display_name("@1") == "myproject"
 
     def test_set_display_name_update(self, mgr: SessionManager) -> None:
-        mgr.bind_thread(100, 1, "@1", window_name="old-name")
+        mgr.bind_thread("100", "1", "@1", window_name="old-name")
         mgr.window_display_names["@1"] = "new-name"
         assert mgr.get_display_name("@1") == "new-name"
 
     def test_bind_thread_sets_display_name(self, mgr: SessionManager) -> None:
-        mgr.bind_thread(100, 1, "@1", window_name="proj")
+        mgr.bind_thread("100", "1", "@1", window_name="proj")
         assert mgr.get_display_name("@1") == "proj"
 
     def test_bind_thread_without_name_no_display(self, mgr: SessionManager) -> None:
-        mgr.bind_thread(100, 1, "@1")
+        mgr.bind_thread("100", "1", "@1")
         # No display name set, fallback to window_id
         assert mgr.get_display_name("@1") == "@1"
 

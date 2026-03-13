@@ -141,7 +141,12 @@ async def send_history(
             elif bot is not None and user_id is not None:
                 await safe_send(
                     bot,
-                    session_manager.resolve_chat_id(user_id, message_thread_id),
+                    session_manager.resolve_chat_id(
+                        str(user_id),
+                        str(message_thread_id)
+                        if message_thread_id is not None
+                        else None,
+                    ),
                     text,
                     message_thread_id=message_thread_id,
                     reply_markup=keyboard,
@@ -150,7 +155,9 @@ async def send_history(
                 await safe_reply(target, text, reply_markup=keyboard)
             # Update offset even if no assistant messages
             if user_id is not None and end_byte > 0:
-                session_manager.update_user_window_offset(user_id, window_id, end_byte)
+                session_manager.update_user_window_offset(
+                    str(user_id), window_id, end_byte
+                )
             return
 
         if is_unread:
@@ -219,7 +226,10 @@ async def send_history(
         # Direct send mode (for unread catch-up after window switch)
         await safe_send(
             bot,
-            session_manager.resolve_chat_id(user_id, message_thread_id),
+            session_manager.resolve_chat_id(
+                str(user_id),
+                str(message_thread_id) if message_thread_id is not None else None,
+            ),
             text,
             message_thread_id=message_thread_id,
             reply_markup=keyboard,
@@ -229,4 +239,4 @@ async def send_history(
 
     # Update user's read offset after viewing unread
     if is_unread and user_id is not None and end_byte > 0:
-        session_manager.update_user_window_offset(user_id, window_id, end_byte)
+        session_manager.update_user_window_offset(str(user_id), window_id, end_byte)

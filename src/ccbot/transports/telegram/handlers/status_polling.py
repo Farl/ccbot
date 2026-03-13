@@ -130,13 +130,14 @@ async def status_poll_loop(bot: Bot) -> None:
             now = time.monotonic()
             if now - last_topic_check >= TOPIC_CHECK_INTERVAL:
                 last_topic_check = now
-                for user_id, thread_id, wid in list(
-                    session_manager.iter_thread_bindings()
-                ):
+                for uid_s, tid_s, wid in list(session_manager.iter_thread_bindings()):
+                    # Convert str IDs to int for Telegram API calls
+                    uid_i = int(uid_s)
+                    tid_i = int(tid_s)
                     try:
                         await bot.unpin_all_forum_topic_messages(
-                            chat_id=session_manager.resolve_chat_id(user_id, thread_id),
-                            message_thread_id=thread_id,
+                            chat_id=session_manager.resolve_chat_id(uid_s, tid_s),
+                            message_thread_id=tid_i,
                         )
                     except BadRequest as e:
                         if "Topic_id_invalid" in str(e):
@@ -144,14 +145,14 @@ async def status_poll_loop(bot: Bot) -> None:
                             w = await tmux_manager.find_window_by_id(wid)
                             if w:
                                 await tmux_manager.kill_window(w.window_id)
-                            session_manager.unbind_thread(user_id, thread_id)
-                            await clear_topic_state(user_id, thread_id, bot)
+                            session_manager.unbind_thread(uid_s, tid_s)
+                            await clear_topic_state(uid_i, tid_i, bot)
                             logger.info(
                                 "Topic deleted: killed window_id '%s' and "
-                                "unbound thread %d for user %d",
+                                "unbound thread %s for user %s",
                                 wid,
-                                thread_id,
-                                user_id,
+                                tid_s,
+                                uid_s,
                             )
                         else:
                             logger.debug(
@@ -166,17 +167,20 @@ async def status_poll_loop(bot: Bot) -> None:
                             e,
                         )
 
-            for user_id, thread_id, wid in list(session_manager.iter_thread_bindings()):
+            for uid_s, tid_s, wid in list(session_manager.iter_thread_bindings()):
+                # Convert str IDs to int for Telegram API calls
+                uid_i = int(uid_s)
+                tid_i = int(tid_s)
                 try:
                     # Clean up stale bindings (window no longer exists)
                     w = await tmux_manager.find_window_by_id(wid)
                     if not w:
-                        session_manager.unbind_thread(user_id, thread_id)
-                        await clear_topic_state(user_id, thread_id, bot)
+                        session_manager.unbind_thread(uid_s, tid_s)
+                        await clear_topic_state(uid_i, tid_i, bot)
                         logger.info(
-                            "Cleaned up stale binding: user=%d thread=%d window_id=%s",
-                            user_id,
-                            thread_id,
+                            "Cleaned up stale binding: user=%s thread=%s window_id=%s",
+                            uid_s,
+                            tid_s,
                             wid,
                         )
                         continue
@@ -184,20 +188,19 @@ async def status_poll_loop(bot: Bot) -> None:
                     # UI detection happens unconditionally in update_status_message.
                     # Status enqueue is skipped inside update_status_message when
                     # interactive UI is detected (returns early) or when queue is non-empty.
-                    queue = get_message_queue(user_id)
+                    queue = get_message_queue(uid_i)
                     skip_status = queue is not None and not queue.empty()
 
                     await update_status_message(
                         bot,
-                        user_id,
+                        uid_i,
                         wid,
-                        thread_id=thread_id,
+                        thread_id=tid_i,
                         skip_status=skip_status,
                     )
                 except Exception as e:
                     logger.debug(
-                        f"Status update error for user {user_id} "
-                        f"thread {thread_id}: {e}"
+                        f"Status update error for user {uid_s} thread {tid_s}: {e}"
                     )
         except Exception as e:
             logger.error(f"Status poll loop error: {e}")

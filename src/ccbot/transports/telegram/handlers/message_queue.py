@@ -301,7 +301,9 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     """Process a content message task."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
-    chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+    chat_id = session_manager.resolve_chat_id(
+        str(user_id), str(task.thread_id) if task.thread_id is not None else None
+    )
 
     # 1. Handle tool_result editing (merged parts are edited together)
     if task.content_type == "tool_result" and task.tool_use_id:
@@ -402,7 +404,9 @@ async def _convert_status_to_content(
         return None
 
     msg_id, stored_wid, _ = info
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+    chat_id = session_manager.resolve_chat_id(
+        str(user_id), str(thread_id_or_0) if thread_id_or_0 else None
+    )
     if stored_wid != window_id:
         # Different window, just delete the old status
         try:
@@ -448,7 +452,9 @@ async def _process_status_update_task(
     """Process a status update task."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
-    chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+    chat_id = session_manager.resolve_chat_id(
+        str(user_id), str(task.thread_id) if task.thread_id is not None else None
+    )
     skey = (user_id, tid)
     status_text = task.text or ""
 
@@ -522,7 +528,9 @@ async def _do_send_status_message(
     """Send a new status message and track it (internal, called from worker)."""
     skey = (user_id, thread_id_or_0)
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    chat_id = session_manager.resolve_chat_id(
+        str(user_id), str(thread_id) if thread_id is not None else None
+    )
     # Safety net: delete any orphaned status message before sending a new one.
     # This catches edge cases where tracking was cleared without deleting the message.
     old = _status_msg_info.pop(skey, None)
@@ -559,7 +567,9 @@ async def _do_clear_status_message(
     info = _status_msg_info.pop(skey, None)
     if info:
         msg_id = info[0]
-        chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+        chat_id = session_manager.resolve_chat_id(
+            str(user_id), str(thread_id_or_0) if thread_id_or_0 else None
+        )
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception as e:

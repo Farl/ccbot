@@ -26,10 +26,16 @@ from .handlers.directory_browser import (
     ACTION_DIR_PAGE,
     ACTION_DIR_SELECT,
     ACTION_DIR_UP,
+    ACTION_SESS_CANCEL,
+    ACTION_SESS_NEW,
+    ACTION_SESS_SELECT,
     build_directory_browser,
+    build_session_picker,
     clear_browse_state,
+    clear_session_picker_state,
     create_session_for_thread,
     get_browse_state,
+    get_session_picker_state,
 )
 from .handlers.interactive_ui import ACTION_NAV_PREFIX, handle_interactive_ui
 from .handlers.message_queue import build_response_parts, enqueue_content_message, shutdown_workers
@@ -276,23 +282,32 @@ def _register_handlers(slack_app: AsyncApp) -> None:
             elif action_id == ACTION_DIR_CONFIRM:
                 pending_text = state.get("pending_text")
                 clear_browse_state(user_id, msg_ts=message_ts)
-                effective_ts = thread_ts
-                if not effective_ts:
-                    resp = await client.chat_postMessage(
-                        channel=channel,
-                        text=f"\U0001f680 Session: {current_path.name}",
+                effective_ts = thread_ts or message_ts
+
+                # Check for existing sessions in this directory
+                sessions = await session_manager.list_sessions_for_directory(str(current_path))
+                if sessions:
+                    picker = build_session_picker(
+                        user_id, sessions,
+                        msg_ts=message_ts, cwd=str(current_path),
+                        pending_text=pending_text, thread_ts=effective_ts,
                     )
-                    effective_ts = resp["ts"] or message_ts
-                window_id = await create_session_for_thread(
-                    user_id, effective_ts, str(current_path)
-                )
-                if window_id:
                     await client.chat_update(
-                        channel=channel,
-                        ts=message_ts,
-                        text=f"\u2705 Session created: {current_path.name}",
-                        blocks=[],
+                        channel=channel, ts=message_ts,
+                        text=picker["text"], blocks=picker["blocks"],
                     )
+                    return
+
+                # No existing sessions — create new window
+                if not thread_ts:
+                    resp = await client.chat_postMessage(
+                        channel=channel, text=f"\U0001f680 Session: {current_path.name}"
+                    )
+                    effective_ts = resp.get("ts") or message_ts
+                window_id = await create_session_for_thread(user_id, effective_ts, str(current_path))
+                if window_id:
+                    await client.chat_update(channel=channel, ts=message_ts,
+                        text=f"\u2705 Session created: {current_path.name}", blocks=[])
                     if pending_text:
                         send_ok, send_msg = await session_manager.send_to_window(
                             window_id, pending_text
@@ -300,12 +315,8 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                         if not send_ok:
                             logger.warning("Failed to forward pending text: %s", send_msg)
                 else:
-                    await client.chat_update(
-                        channel=channel,
-                        ts=message_ts,
-                        text="\u274c Failed to create session",
-                        blocks=[],
-                    )
+                    await client.chat_update(channel=channel, ts=message_ts,
+                        text="\u274c Failed to create session", blocks=[])
             elif action_id == ACTION_DIR_CANCEL:
                 clear_browse_state(user_id, msg_ts=message_ts)
                 await client.chat_update(
@@ -313,6 +324,68 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                 )
         except Exception as e:
             logger.error("Dir action error: %s (action=%s)", e, action_id, exc_info=True)
+
+    @slack_app.action(re.compile(r"^sess_"))
+    async def handle_sess_action(ack: Any, body: dict[str, Any], client: Any) -> None:
+        await ack()
+        action = body["actions"][0]
+        action_id: str = action["action_id"]
+        user_id: str = body["user"]["id"]
+        channel: str = body["channel"]["id"]
+        message_ts: str = body["message"]["ts"]
+
+        state = get_session_picker_state(user_id, msg_ts=message_ts)
+        if not state:
+            return
+
+        sessions = state.get("sessions", [])
+        cwd: str = state.get("cwd", "")
+        pending_text: str | None = state.get("pending_text")
+        thread_ts: str = state.get("thread_ts", message_ts)
+
+        try:
+            if action_id.startswith(ACTION_SESS_SELECT):
+                idx = int(action_id[len(ACTION_SESS_SELECT):])
+                if idx < 0 or idx >= len(sessions):
+                    return
+                session = sessions[idx]
+                clear_session_picker_state(user_id, msg_ts=message_ts)
+                window_id = await create_session_for_thread(
+                    user_id, thread_ts, cwd,
+                    resume_session_id=session.session_id,
+                )
+                if window_id:
+                    await client.chat_update(channel=channel, ts=message_ts,
+                        text=f"\u2705 Resumed session {session.session_id[:8]}", blocks=[])
+                    if pending_text:
+                        ok, err = await session_manager.send_to_window(window_id, pending_text)
+                        if not ok:
+                            logger.warning("Failed to forward pending text: %s", err)
+                else:
+                    await client.chat_update(channel=channel, ts=message_ts,
+                        text="\u274c Failed to resume session", blocks=[])
+
+            elif action_id == ACTION_SESS_NEW:
+                clear_session_picker_state(user_id, msg_ts=message_ts)
+                window_id = await create_session_for_thread(user_id, thread_ts, cwd)
+                if window_id:
+                    await client.chat_update(channel=channel, ts=message_ts,
+                        text=f"\u2705 New session: {cwd}", blocks=[])
+                    if pending_text:
+                        ok, err = await session_manager.send_to_window(window_id, pending_text)
+                        if not ok:
+                            logger.warning("Failed to forward pending text: %s", err)
+                else:
+                    await client.chat_update(channel=channel, ts=message_ts,
+                        text="\u274c Failed to create session", blocks=[])
+
+            elif action_id == ACTION_SESS_CANCEL:
+                clear_session_picker_state(user_id, msg_ts=message_ts)
+                await client.chat_update(channel=channel, ts=message_ts,
+                    text="Cancelled.", blocks=[])
+
+        except Exception as e:
+            logger.error("Sess action error: %s (action=%s)", e, action_id, exc_info=True)
 
     @slack_app.action("noop")
     async def handle_noop(ack: Any) -> None:

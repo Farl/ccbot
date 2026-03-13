@@ -4,16 +4,19 @@ Provides a directory navigation UI using Slack's interactive blocks:
   - Navigate directories with button clicks
   - Pagination for large directory listings
   - Create tmux sessions from selected directories
+  - Session picker to resume existing Claude sessions
 
 Action ID constants are exported for pattern matching in the bot module.
 """
 
 import logging
+import os
+import time
 from pathlib import Path
 from typing import Any
 
 from ....config import config
-from ....session import session_manager
+from ....session import ClaudeSession, session_manager
 from ....tmux_manager import tmux_manager
 
 logger = logging.getLogger(__name__)
@@ -27,8 +30,15 @@ ACTION_DIR_CONFIRM = "dir_confirm"
 ACTION_DIR_CANCEL = "dir_cancel"
 ACTION_DIR_PAGE = "dir_page_"
 
+ACTION_SESS_SELECT = "sess_select_"
+ACTION_SESS_NEW = "sess_new"
+ACTION_SESS_CANCEL = "sess_cancel"
+
 # Per-message browse state: msg_ts -> {path, dirs, page, user_id}
 _browse_states: dict[str, dict[str, Any]] = {}
+
+# Session picker state keyed by msg_ts
+_session_picker_states: dict[str, dict[str, Any]] = {}
 
 
 def get_browse_state(user_id: str, msg_ts: str | None = None) -> dict[str, Any] | None:
@@ -57,6 +67,87 @@ def clear_browse_state(user_id: str, msg_ts: str | None = None) -> None:
     to_remove = [ts for ts, s in _browse_states.items() if s.get("user_id") == user_id]
     for ts in to_remove:
         _browse_states.pop(ts, None)
+
+
+def get_session_picker_state(user_id: str, msg_ts: str) -> dict[str, Any] | None:
+    """Return session picker state for a message (None if not found or wrong user)."""
+    state = _session_picker_states.get(msg_ts)
+    if state and state.get("user_id") == user_id:
+        return state
+    return None
+
+
+def clear_session_picker_state(user_id: str, msg_ts: str) -> None:
+    """Clear session picker state for a message."""
+    state = _session_picker_states.get(msg_ts)
+    if state and state.get("user_id") == user_id:
+        _session_picker_states.pop(msg_ts, None)
+
+
+def build_session_picker(
+    user_id: str,
+    sessions: list[ClaudeSession],
+    msg_ts: str = "",
+    cwd: str = "",
+    pending_text: str | None = None,
+    thread_ts: str = "",
+) -> dict[str, Any]:
+    """Build Block Kit session picker for resuming existing Claude sessions.
+
+    Stores picker state keyed by msg_ts (including pending_text and thread_ts
+    so the action callbacks can forward the original message after session creation).
+    Returns dict with 'text' and 'blocks' keys.
+    """
+    _session_picker_states[msg_ts] = {
+        "user_id": user_id,
+        "sessions": sessions,
+        "cwd": cwd,
+        "pending_text": pending_text,
+        "thread_ts": thread_ts,
+    }
+
+    header = f"*Resume a session in `{cwd}`?*" if cwd else "*Resume an existing session?*"
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": header}}
+    ]
+
+    for i, session in enumerate(sessions):
+        short_id = session.session_id[:8]
+        try:
+            mtime = time.strftime(
+                "%m-%d %H:%M",
+                time.localtime(os.path.getmtime(session.file_path)),
+            )
+        except (OSError, AttributeError):
+            mtime = "?"
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": f"\u25b6 {short_id} ({mtime})"},
+                "action_id": f"{ACTION_SESS_SELECT}{i}",
+            }],
+        })
+
+    blocks.append({
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "\u2728 New session"},
+                "action_id": ACTION_SESS_NEW,
+                "style": "primary",
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Cancel"},
+                "action_id": ACTION_SESS_CANCEL,
+                "style": "danger",
+            },
+        ],
+    })
+
+    return {"text": "Resume session or start new?", "blocks": blocks}
 
 
 def build_directory_browser(
@@ -203,26 +294,53 @@ async def create_session_for_thread(
     user_id: str,
     thread_ts: str,
     directory: str,
+    resume_session_id: str | None = None,
 ) -> str | None:
-    """Create a tmux window and bind it to a Slack thread.
+    """Create (or resume) a tmux window and bind it to a Slack thread.
+
+    When resume_session_id is set, passes --resume to Claude Code. The hook
+    will report a new session_id, but messages continue writing to the
+    original JSONL file. We override window_state to track the original
+    session_id so the session monitor routes messages back correctly.
 
     Returns the window_id on success, None on failure.
     """
-    success, msg, window_name, window_id = await tmux_manager.create_window(directory)
+    success, msg, window_name, window_id = await tmux_manager.create_window(
+        directory, resume_session_id=resume_session_id
+    )
     if not success:
         logger.error("Failed to create window for %s: %s", directory, msg)
         return None
 
     session_manager.bind_thread(user_id, thread_ts, window_id, window_name)
 
-    # Wait for session_map entry (hook fires on SessionStart)
-    await session_manager.wait_for_session_map_entry(window_id, timeout=10.0)
+    hook_timeout = 15.0 if resume_session_id else 10.0
+    hook_ok = await session_manager.wait_for_session_map_entry(window_id, timeout=hook_timeout)
+
+    if resume_session_id:
+        ws = session_manager.get_window_state(window_id)
+        if not hook_ok:
+            # Hook timed out — manually populate window_state
+            logger.warning(
+                "Hook timeout for resume window %s, manually setting session_id=%s",
+                window_id, resume_session_id,
+            )
+            if ws:
+                ws.session_id = resume_session_id
+                ws.cwd = directory
+                ws.window_name = window_name
+                session_manager._save_state()
+        elif ws and ws.session_id != resume_session_id:
+            logger.info(
+                "Resume override: window %s session_id %s -> %s",
+                window_id, ws.session_id, resume_session_id,
+            )
+            ws.session_id = resume_session_id
+            session_manager._save_state()
 
     logger.info(
-        "Created session: user=%s, thread=%s, window=%s (%s)",
-        user_id,
-        thread_ts,
-        window_id,
-        window_name,
+        "Session %s: user=%s, thread=%s, window=%s (%s)",
+        "resumed" if resume_session_id else "created",
+        user_id, thread_ts, window_id, window_name,
     )
     return window_id

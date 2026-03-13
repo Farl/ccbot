@@ -418,6 +418,8 @@ class TmuxManager:
                 if start_claude:
                     pane = window.active_pane
                     if pane:
+                        # Clear CLAUDECODE env var to prevent nested session detection
+                        pane.send_keys("unset CLAUDECODE", enter=True)
                         cmd = config.claude_command
                         if resume_session_id:
                             cmd = f"{cmd} --resume {resume_session_id}"

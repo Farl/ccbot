@@ -27,28 +27,48 @@ ACTION_DIR_CONFIRM = "dir_confirm"
 ACTION_DIR_CANCEL = "dir_cancel"
 ACTION_DIR_PAGE = "dir_page_"
 
-# Per-user browse state: user_id -> {path, dirs, page}
+# Per-message browse state: msg_ts -> {path, dirs, page, user_id}
 _browse_states: dict[str, dict[str, Any]] = {}
 
 
-def get_browse_state(user_id: str) -> dict[str, Any] | None:
-    """Get current browse state for a user."""
-    return _browse_states.get(user_id)
+def get_browse_state(user_id: str, msg_ts: str | None = None) -> dict[str, Any] | None:
+    """Get current browse state for a user.
+
+    If msg_ts is given, look up by message ts (preferred).
+    Otherwise fall back to scanning for user_id (legacy).
+    """
+    if msg_ts and msg_ts in _browse_states:
+        state = _browse_states[msg_ts]
+        if state.get("user_id") == user_id:
+            return state
+    # Fallback: find by user_id
+    for _ts, state in _browse_states.items():
+        if state.get("user_id") == user_id:
+            return state
+    return None
 
 
-def clear_browse_state(user_id: str) -> None:
+def clear_browse_state(user_id: str, msg_ts: str | None = None) -> None:
     """Clear browse state for a user."""
-    _browse_states.pop(user_id, None)
+    if msg_ts and msg_ts in _browse_states:
+        _browse_states.pop(msg_ts, None)
+        return
+    # Fallback: clear by user_id
+    to_remove = [ts for ts, s in _browse_states.items() if s.get("user_id") == user_id]
+    for ts in to_remove:
+        _browse_states.pop(ts, None)
 
 
 def build_directory_browser(
     user_id: str,
     path: Path | None = None,
     page: int = 0,
+    msg_ts: str | None = None,
 ) -> dict[str, Any]:
     """Build directory browser UI with Block Kit blocks.
 
     Returns dict with 'text' (fallback) and 'blocks' keys.
+    If msg_ts is provided, state is keyed by message ts for reliable lookup.
     """
     if path is None:
         path = Path.home()
@@ -70,12 +90,15 @@ def build_directory_browser(
     start = page * DIRS_PER_PAGE
     page_dirs = subdirs[start : start + DIRS_PER_PAGE]
 
-    # Save state for callback handling
-    _browse_states[user_id] = {
+    # Save state keyed by msg_ts (if available) for reliable callback lookup
+    state = {
         "path": str(path),
         "dirs": subdirs,
         "page": page,
+        "user_id": user_id,
     }
+    key = msg_ts if msg_ts else user_id
+    _browse_states[key] = state
 
     display_path = str(path).replace(str(Path.home()), "~")
     header_text = f"*Select Working Directory*\n`{display_path}`"

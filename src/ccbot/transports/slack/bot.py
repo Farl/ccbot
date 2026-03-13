@@ -2,7 +2,7 @@
 
 Bridges Slack threads to Claude Code sessions via tmux windows.
 Each Slack thread is bound to one tmux window running one Claude Code instance.
-Top-level messages trigger the directory browser for session creation.
+Uses Slack's Agents & Assistants framework: each assistant thread maps to one session.
 
 Uses slack-bolt's AsyncApp with Socket Mode for real-time event handling.
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
-from slack_bolt.async_app import AsyncApp
+from slack_bolt.async_app import AsyncApp, AsyncAssistant
 
 from ...config import config
 from ...session import session_manager
@@ -61,54 +61,121 @@ async def _resolve_dm_channel(user_id: str) -> str | None:
         return None
 
 
-def _is_bot_message(event: dict[str, Any]) -> bool:
-    """Check if a message event is from a bot."""
-    return event.get("bot_id") is not None or event.get("subtype") == "bot_message"
+async def _handle_user_message(
+    user_id: str,
+    channel: str,
+    thread_ts: str,
+    text: str,
+    client: Any,
+    say: Any,
+) -> None:
+    """Core message handler shared by assistant and regular message events."""
+    if not config.is_user_allowed(user_id):
+        return
+    if not text:
+        return
+
+    # Check if this thread already has a session bound
+    window_id = session_manager.resolve_window_for_thread(user_id, thread_ts)
+    logger.info(
+        "Thread lookup: user=%s thread_ts=%s -> window_id=%s (bindings=%s)",
+        user_id,
+        thread_ts,
+        window_id,
+        dict(session_manager.thread_bindings.get(user_id, {})),
+    )
+    if window_id:
+        # Thread is bound — forward message to Claude Code
+        success, msg = await session_manager.send_to_window(window_id, text)
+        if not success:
+            await say(text=f"Failed: {msg}", channel=channel, thread_ts=thread_ts)
+        return
+
+    # No session for this thread — show directory browser
+    logger.debug(
+        "Showing directory browser for user=%s thread=%s", user_id, thread_ts
+    )
+    try:
+        # First send a placeholder, then update with browser keyed by msg_ts
+        browser = build_directory_browser(user_id)
+        resp = await client.chat_postMessage(
+            channel=channel,
+            text=browser["text"],
+            blocks=browser["blocks"],
+            thread_ts=thread_ts,
+        )
+        # Re-build with msg_ts so action callbacks can find the state
+        msg_ts = resp.get("ts", "")
+        if msg_ts:
+            build_directory_browser(user_id, msg_ts=msg_ts)
+        logger.debug("Directory browser sent: ts=%s", msg_ts)
+    except Exception as e:
+        logger.error("Failed to send directory browser: %s", e)
 
 
 def _register_handlers(slack_app: AsyncApp) -> None:
     """Register all event and action handlers on the app."""
 
+    # --- Assistant handler for Agents & Assistants threads ---
+    assistant = AsyncAssistant()
+
+    @assistant.thread_started
+    async def handle_thread_started(
+        say: Any,
+        set_suggested_prompts: Any,
+    ) -> None:
+        """Called when a user opens a new assistant thread."""
+        await say("Send a message to start a Claude Code session.")
+        await set_suggested_prompts(
+            prompts=[
+                {"title": "Start session", "message": "Start a new Claude Code session"},
+            ]
+        )
+
+    @assistant.user_message
+    async def handle_assistant_message(
+        payload: dict[str, Any],
+        client: Any,
+        say: Any,
+        set_status: Any,
+    ) -> None:
+        """Called when the user sends a message in an assistant thread."""
+        user_id: str = payload.get("user", "")
+        channel: str = payload.get("channel", "")
+        thread_ts: str = payload.get("thread_ts") or payload.get("ts", "")
+        text: str = payload.get("text", "")
+
+        logger.debug(
+            "Assistant message: user=%s channel=%s thread=%s text=%s",
+            user_id,
+            channel,
+            thread_ts,
+            text[:50],
+        )
+
+        await set_status(status="processing...")
+        await _handle_user_message(user_id, channel, thread_ts, text, client, say)
+
+    slack_app.assistant(assistant)
+
+    # --- Message handler for all DMs (assistant and non-assistant) ---
     @slack_app.event("message")
     async def handle_message(
         event: dict[str, Any],
         say: Any,
         client: Any,
     ) -> None:
-        if _is_bot_message(event):
+        if event.get("bot_id") is not None or event.get("subtype") == "bot_message":
             return
+
         user_id: str = event.get("user", "")
-        if not config.is_user_allowed(user_id):
-            return
         channel: str = event.get("channel", "")
-        thread_ts: str | None = event.get("thread_ts")
+        thread_ts: str = event.get("thread_ts") or event.get("ts", "")
         text: str = event.get("text", "")
-        if not text:
-            return
 
-        if not thread_ts:
-            # Top-level message: show directory browser
-            browser = build_directory_browser(user_id)
-            await client.chat_postMessage(
-                channel=channel,
-                text=browser["text"],
-                blocks=browser["blocks"],
-            )
-            return
+        await _handle_user_message(user_id, channel, thread_ts, text, client, say)
 
-        window_id = session_manager.resolve_window_for_thread(user_id, thread_ts)
-        if not window_id:
-            await say(
-                text="This thread is not bound to a session. "
-                "Send a top-level message to start one.",
-                channel=channel,
-                thread_ts=thread_ts,
-            )
-            return
-
-        success, msg = await session_manager.send_to_window(window_id, text)
-        if not success:
-            await say(text=f"Failed: {msg}", channel=channel, thread_ts=thread_ts)
+    # --- Action handlers (work for both assistant and regular threads) ---
 
     @slack_app.action(re.compile(r"^dir_"))
     async def handle_dir_action(ack: Any, body: dict[str, Any], client: Any) -> None:
@@ -120,71 +187,80 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         message_ts: str = body["message"]["ts"]
         thread_ts: str | None = body["message"].get("thread_ts")
 
-        state = get_browse_state(user_id)
+        logger.info("Dir action: %s (user=%s, msg_ts=%s)", action_id, user_id, message_ts)
+
+        state = get_browse_state(user_id, msg_ts=message_ts)
         if not state:
+            logger.warning("No browse state for user=%s msg_ts=%s", user_id, message_ts)
             return
         current_path = Path(state["path"])
 
-        if action_id.startswith(ACTION_DIR_SELECT):
-            idx = int(action_id[len(ACTION_DIR_SELECT) :])
-            dirs: list[str] = state["dirs"]
-            if 0 <= idx < len(dirs):
-                new_path = current_path / dirs[idx]
-                browser = build_directory_browser(user_id, new_path)
-                await client.chat_update(
+        try:
+            if action_id.startswith(ACTION_DIR_SELECT):
+                idx = int(action_id[len(ACTION_DIR_SELECT) :])
+                dirs: list[str] = state["dirs"]
+                if 0 <= idx < len(dirs):
+                    new_path = current_path / dirs[idx]
+                    browser = build_directory_browser(user_id, new_path, msg_ts=message_ts)
+                    resp = await client.chat_update(
+                        channel=channel,
+                        ts=message_ts,
+                        text=browser["text"],
+                        blocks=browser["blocks"],
+                    )
+                    logger.info("chat_update ok=%s for %s", resp.get("ok"), action_id)
+            elif action_id == ACTION_DIR_UP:
+                browser = build_directory_browser(user_id, current_path.parent, msg_ts=message_ts)
+                resp = await client.chat_update(
                     channel=channel,
                     ts=message_ts,
                     text=browser["text"],
                     blocks=browser["blocks"],
                 )
-        elif action_id == ACTION_DIR_UP:
-            browser = build_directory_browser(user_id, current_path.parent)
-            await client.chat_update(
-                channel=channel,
-                ts=message_ts,
-                text=browser["text"],
-                blocks=browser["blocks"],
-            )
-        elif action_id.startswith(ACTION_DIR_PAGE):
-            page = int(action_id[len(ACTION_DIR_PAGE) :])
-            browser = build_directory_browser(user_id, current_path, page)
-            await client.chat_update(
-                channel=channel,
-                ts=message_ts,
-                text=browser["text"],
-                blocks=browser["blocks"],
-            )
-        elif action_id == ACTION_DIR_CONFIRM:
-            clear_browse_state(user_id)
-            effective_ts = thread_ts
-            if not effective_ts:
-                resp = await client.chat_postMessage(
-                    channel=channel,
-                    text=f"\U0001f680 Session: {current_path.name}",
-                )
-                effective_ts = resp["ts"] or message_ts
-            window_id = await create_session_for_thread(
-                user_id, effective_ts, str(current_path)
-            )
-            if window_id:
-                await client.chat_update(
+                logger.info("chat_update ok=%s for %s", resp.get("ok"), action_id)
+            elif action_id.startswith(ACTION_DIR_PAGE):
+                page = int(action_id[len(ACTION_DIR_PAGE) :])
+                browser = build_directory_browser(user_id, current_path, page, msg_ts=message_ts)
+                resp = await client.chat_update(
                     channel=channel,
                     ts=message_ts,
-                    text=f"\u2705 Session created: {current_path.name}",
-                    blocks=[],
+                    text=browser["text"],
+                    blocks=browser["blocks"],
                 )
-            else:
+                logger.info("chat_update ok=%s for %s", resp.get("ok"), action_id)
+            elif action_id == ACTION_DIR_CONFIRM:
+                clear_browse_state(user_id, msg_ts=message_ts)
+                effective_ts = thread_ts
+                if not effective_ts:
+                    resp = await client.chat_postMessage(
+                        channel=channel,
+                        text=f"\U0001f680 Session: {current_path.name}",
+                    )
+                    effective_ts = resp["ts"] or message_ts
+                window_id = await create_session_for_thread(
+                    user_id, effective_ts, str(current_path)
+                )
+                if window_id:
+                    await client.chat_update(
+                        channel=channel,
+                        ts=message_ts,
+                        text=f"\u2705 Session created: {current_path.name}",
+                        blocks=[],
+                    )
+                else:
+                    await client.chat_update(
+                        channel=channel,
+                        ts=message_ts,
+                        text="\u274c Failed to create session",
+                        blocks=[],
+                    )
+            elif action_id == ACTION_DIR_CANCEL:
+                clear_browse_state(user_id, msg_ts=message_ts)
                 await client.chat_update(
-                    channel=channel,
-                    ts=message_ts,
-                    text="\u274c Failed to create session",
-                    blocks=[],
+                    channel=channel, ts=message_ts, text="Cancelled.", blocks=[]
                 )
-        elif action_id == ACTION_DIR_CANCEL:
-            clear_browse_state(user_id)
-            await client.chat_update(
-                channel=channel, ts=message_ts, text="Cancelled.", blocks=[]
-            )
+        except Exception as e:
+            logger.error("Dir action error: %s (action=%s)", e, action_id, exc_info=True)
 
     @slack_app.action("noop")
     async def handle_noop(ack: Any) -> None:

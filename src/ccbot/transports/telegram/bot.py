@@ -1899,6 +1899,9 @@ def create_bot() -> Application:
     application = (
         Application.builder()
         .token(config.telegram_bot_token)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
         .rate_limiter(AIORateLimiter(max_retries=5))
         .post_init(post_init)
         .post_shutdown(post_shutdown)

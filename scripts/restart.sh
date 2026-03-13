@@ -7,15 +7,16 @@ TARGET="${TMUX_SESSION}:${TMUX_WINDOW}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 MAX_WAIT=10  # seconds to wait for process to exit
 
-# Check if tmux session and window exist
-if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    echo "Error: tmux session '$TMUX_SESSION' does not exist"
-    exit 1
-fi
+# Ensure uv is on PATH (handles tmux sessions without full shell init)
+export PATH="$HOME/.local/bin:$PATH"
 
-if ! tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$TMUX_WINDOW"; then
-    echo "Error: window '$TMUX_WINDOW' not found in session '$TMUX_SESSION'"
-    exit 1
+# Ensure tmux session and window exist, creating them if needed
+if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    echo "tmux session '$TMUX_SESSION' not found, creating..."
+    tmux new-session -d -s "$TMUX_SESSION" -n "$TMUX_WINDOW"
+elif ! tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$TMUX_WINDOW"; then
+    echo "Window '$TMUX_WINDOW' not found, creating..."
+    tmux new-window -t "$TMUX_SESSION" -n "$TMUX_WINDOW"
 fi
 
 # Get the pane PID and check if uv run ccbot is running
@@ -63,7 +64,7 @@ sleep 1
 
 # Start ccbot
 echo "Starting ccbot in $TARGET..."
-tmux send-keys -t "$TARGET" "cd ${PROJECT_DIR} && uv run ccbot" Enter
+tmux send-keys -t "$TARGET" "cd ${PROJECT_DIR} && PATH=\"\$HOME/.local/bin:\$PATH\" uv run ccbot" Enter
 
 # Verify startup and show logs
 sleep 3

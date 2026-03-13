@@ -15,7 +15,7 @@ from mistletoe.block_token import BlockCode, remove_token
 from telegramify_markdown import _update_block, escape_latex
 from telegramify_markdown.render import TelegramMarkdownRenderer
 
-from .transcript_parser import TranscriptParser
+from ...transcript_parser import TranscriptParser
 
 _TABLE_SEP_RE = re.compile(r"^[\s|:\-]+$")
 

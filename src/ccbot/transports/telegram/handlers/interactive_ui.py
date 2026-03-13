@@ -18,9 +18,9 @@ import logging
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-from ..session import session_manager
-from ..terminal_parser import extract_interactive_content, is_interactive_ui
-from ..tmux_manager import tmux_manager
+from ....session import session_manager
+from ....terminal_parser import extract_interactive_content, is_interactive_ui
+from ....tmux_manager import tmux_manager
 from .callback_data import (
     CB_ASK_DOWN,
     CB_ASK_ENTER,

@@ -57,7 +57,7 @@ from telegram.ext import (
     filters,
 )
 
-from .config import config
+from ...config import config
 from .handlers.callback_data import (
     CB_ASK_DOWN,
     CB_ASK_ENTER,
@@ -129,14 +129,14 @@ from .handlers.message_sender import (
 from .markdown_v2 import convert_markdown
 from .handlers.response_builder import build_response_parts
 from .handlers.status_polling import status_poll_loop
-from .screenshot import text_to_image
-from .session import session_manager
-from .session_monitor import NewMessage, SessionMonitor
-from .terminal_parser import extract_bash_output, is_interactive_ui
-from .tmux_manager import tmux_manager
-from .transcribe import close_client as close_transcribe_client
-from .transcribe import transcribe_voice
-from .utils import ccbot_dir
+from ...screenshot import text_to_image
+from ...session import session_manager
+from ...session_monitor import NewMessage, SessionMonitor
+from ...terminal_parser import extract_bash_output, is_interactive_ui
+from ...tmux_manager import tmux_manager
+from ...transcribe import close_client as close_transcribe_client
+from ...transcribe import transcribe_voice
+from ...utils import ccbot_dir
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +335,7 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     # Try to parse structured usage info
-    from .terminal_parser import parse_usage_output
+    from ...terminal_parser import parse_usage_output
 
     usage = parse_usage_output(pane_text)
     if usage and usage.parsed_lines:

@@ -55,7 +55,7 @@ def main() -> None:
     logger.info("Tmux session '%s' ready", session.session_name)
 
     logger.info("Starting Telegram bot...")
-    from .bot import create_bot
+    from .transports.telegram.bot import create_bot
 
     application = create_bot()
     application.run_polling(allowed_updates=["message", "callback_query"])

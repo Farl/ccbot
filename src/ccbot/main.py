@@ -83,7 +83,7 @@ def main() -> None:
             )
             sys.exit(1)
         logger.info("Starting Slack bot...")
-        from .transports.slack.bot import run_slack_bot  # type: ignore[import-not-found]
+        from .transports.slack.bot import run_slack_bot
 
         run_slack_bot()
 

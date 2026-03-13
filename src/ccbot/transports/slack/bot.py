@@ -391,6 +391,13 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                         text=f"\u2705 Session created: {current_path.name}",
                         blocks=[],
                     )
+                    display_path = str(current_path).replace(str(Path.home()), "~")
+                    try:
+                        await client.assistant_threads_setTitle(
+                            channel_id=channel, thread_ts=effective_ts, title=display_path
+                        )
+                    except Exception:
+                        logger.debug("Failed to set thread title", exc_info=True)
                     if pending_text:
                         send_ok, send_msg = await session_manager.send_to_window(
                             window_id, pending_text
@@ -454,6 +461,13 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                         text=f"\u2705 Resumed session {session.session_id[:8]}",
                         blocks=[],
                     )
+                    display_path = cwd.replace(str(Path.home()), "~")
+                    try:
+                        await client.assistant_threads_setTitle(
+                            channel_id=channel, thread_ts=thread_ts, title=display_path
+                        )
+                    except Exception:
+                        logger.debug("Failed to set thread title", exc_info=True)
                     if pending_text:
                         ok, err = await session_manager.send_to_window(
                             window_id, pending_text
@@ -478,6 +492,13 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                         text=f"\u2705 New session: {cwd}",
                         blocks=[],
                     )
+                    display_path = cwd.replace(str(Path.home()), "~")
+                    try:
+                        await client.assistant_threads_setTitle(
+                            channel_id=channel, thread_ts=thread_ts, title=display_path
+                        )
+                    except Exception:
+                        logger.debug("Failed to set thread title", exc_info=True)
                     if pending_text:
                         ok, err = await session_manager.send_to_window(
                             window_id, pending_text

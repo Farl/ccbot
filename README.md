@@ -99,7 +99,13 @@ ALLOWED_USERS=your_telegram_user_id
 > CLAUDE_COMMAND=IS_SANDBOX=1 claude --dangerously-skip-permissions
 > ```
 
-## Hook Setup (Recommended)
+> If running ccbot **inside a Claude Code session** (e.g. during development), child Claude processes will fail with "cannot be launched inside another Claude Code session". Fix:
+>
+> ```
+> CLAUDE_COMMAND=env -u CLAUDECODE claude
+> ```
+
+## Hook Setup (Required)
 
 Auto-install via CLI:
 
@@ -122,6 +128,8 @@ Or manually add to `~/.claude/settings.json`:
 ```
 
 This writes window-session mappings to `$CCBOT_DIR/session_map.json` (`~/.ccbot/` by default), so the bot automatically tracks which Claude session is running in each tmux window — even after `/clear` or session restarts.
+
+**Without the hook, ccbot cannot monitor Claude sessions and no messages will be delivered.**
 
 ## Usage
 
@@ -263,6 +271,51 @@ src/ccbot/
     ├── response_builder.py # Response message building (format tool_use, thinking, etc.)
     └── status_polling.py  # Terminal status line polling
 ```
+
+## Troubleshooting
+
+### WSL2 (Windows Subsystem for Linux)
+
+**Network connectivity issues (TimedOut on startup)**
+
+WSL2 uses a virtual network adapter that can be unstable. Enable mirrored networking mode for a more reliable connection:
+
+```ini
+# Add to %USERPROFILE%\.wslconfig on Windows, then run: wsl --shutdown
+[wsl2]
+networkingMode=mirrored
+```
+
+**IPv6 causing connection timeouts**
+
+If mirrored networking is not available or Telegram is unreachable via IPv6:
+
+```bash
+# Disable IPv6 for the current session
+sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1
+
+# Make it permanent (survives WSL restarts)
+echo "net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1" | sudo tee -a /etc/sysctl.conf
+```
+
+### Claude won't start ("cannot be launched inside another Claude Code session")
+
+If ccbot is running inside a Claude Code session (e.g. you launched it via a Claude Code terminal), set:
+
+```ini
+CLAUDE_COMMAND=env -u CLAUDECODE claude
+```
+
+### Sessions not being monitored (no messages delivered)
+
+Ensure the SessionStart hook is installed:
+
+```bash
+ccbot hook --install
+```
+
+Then restart any running Claude sessions so the hook fires and registers them.
 
 ## Contributors
 

@@ -6,8 +6,11 @@ Handles two execution modes:
      Telegram bot polling loop via bot.create_bot().
 """
 
+import json
 import logging
+import os
 import sys
+from pathlib import Path
 
 
 def main() -> None:
@@ -45,6 +48,34 @@ def main() -> None:
     logging.getLogger("telegram.ext.AIORateLimiter").setLevel(logging.INFO)
     logger = logging.getLogger(__name__)
 
+    # Warn if running inside a Claude Code session with wrong CLAUDE_COMMAND
+    if os.environ.get("CLAUDECODE") and "CLAUDECODE" not in config.claude_command:
+        logger.warning(
+            "Running inside a Claude Code session (CLAUDECODE env var is set) but "
+            "CLAUDE_COMMAND does not unset it. Child Claude processes will fail. "
+            "Set: CLAUDE_COMMAND=env -u CLAUDECODE claude"
+        )
+
+    # Warn if SessionStart hook is not installed
+    from .hook import _find_existing_hook
+
+    claude_config_dir = os.environ.get(
+        "CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")
+    )
+    settings_path = Path(claude_config_dir) / "settings.json"
+    hook_installed = False
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+        hook_installed = _find_existing_hook(settings) is not None
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    if not hook_installed:
+        logger.warning(
+            "SessionStart hook not installed. Session tracking will not work. "
+            "Run: ccbot hook --install"
+        )
+
     from .tmux_manager import tmux_manager
 
     logger.info("Allowed users: %s", config.allowed_users)
@@ -54,11 +85,38 @@ def main() -> None:
     session = tmux_manager.get_or_create_session()
     logger.info("Tmux session '%s' ready", session.session_name)
 
+    # Warn if TMUX_SESSION_NAME changed but session_map still has old entries
+    from .utils import ccbot_dir
+
+    session_map_path = ccbot_dir() / "session_map.json"
+    try:
+        with open(session_map_path) as f:
+            session_map = json.load(f)
+        other_sessions = {
+            parts[0]
+            for key in session_map
+            for parts in [key.split(":", 1)]
+            if len(parts) == 2 and parts[0] != config.tmux_session_name
+        }
+        if other_sessions:
+            logger.warning(
+                "session_map.json has entries for tmux session(s) %s but "
+                "TMUX_SESSION_NAME is '%s'. Existing topic bindings will be dropped. "
+                "You will need to recreate sessions in Telegram.",
+                other_sessions,
+                config.tmux_session_name,
+            )
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
     logger.info("Starting Telegram bot...")
     from .bot import create_bot
 
     application = create_bot()
-    application.run_polling(allowed_updates=["message", "callback_query"])
+    application.run_polling(
+        allowed_updates=["message", "callback_query"],
+        bootstrap_retries=-1,
+    )
 
 
 if __name__ == "__main__":

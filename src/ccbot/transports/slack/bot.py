@@ -32,7 +32,7 @@ from .handlers.directory_browser import (
     get_browse_state,
 )
 from .handlers.interactive_ui import ACTION_NAV_PREFIX, handle_interactive_ui
-from .handlers.message_sender import send_long_message
+from .handlers.message_queue import build_response_parts, enqueue_content_message, shutdown_workers
 from .handlers.status_polling import record_content_delivery, start_status_polling
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ async def _handle_user_message(
     thread_ts: str,
     text: str,
     client: Any,
-    say: Any,
+    say: Any = None,
 ) -> None:
     """Core message handler shared by assistant and regular message events."""
     if not config.is_user_allowed(user_id):
@@ -124,7 +124,13 @@ async def _handle_user_message(
                 await _restart_claude_in_window(window)
             success, msg = await session_manager.send_to_window(window_id, text)
             if not success:
-                await say(text=f"Failed: {msg}", channel=channel, thread_ts=thread_ts)
+                error_text = f"Failed: {msg}"
+                if say is not None:
+                    await say(text=error_text, channel=channel, thread_ts=thread_ts)
+                else:
+                    assert app is not None
+                    from .handlers.message_sender import send_message
+                    await send_message(app.client, channel, error_text, thread_ts=thread_ts)
             return
 
     # No session for this thread — show directory browser
@@ -355,14 +361,42 @@ def _register_handlers(slack_app: AsyncApp) -> None:
 async def handle_new_message(msg: NewMessage) -> None:
     """Session monitor callback — deliver Claude messages to Slack threads."""
     users = await session_manager.find_users_for_session(msg.session_id)
-    for user_id, _window_id, thread_id in users:
+    for user_id, window_id, thread_id in users:
         channel = await _resolve_dm_channel(user_id)
         if not channel:
             continue
         assert app is not None
+
         record_content_delivery(user_id, thread_id)
-        text = f"👤 {msg.text}" if msg.role == "user" else msg.text
-        await send_long_message(app.client, channel, text, thread_ts=thread_id)
+
+        parts = build_response_parts(
+            msg.text,
+            msg.is_complete,
+            msg.content_type,
+            msg.role,
+        )
+
+        if msg.is_complete:
+            await enqueue_content_message(
+                client=app.client,
+                user_id=user_id,
+                channel=channel,
+                thread_ts=thread_id,
+                window_id=window_id,
+                parts=parts,
+                tool_use_id=msg.tool_use_id,
+                content_type=msg.content_type,
+                text=msg.text,
+            )
+
+            # Track read offset — prevents message replay on restart
+            session = await session_manager.resolve_session_for_window(window_id)
+            if session and session.file_path:
+                try:
+                    file_size = Path(session.file_path).stat().st_size
+                    session_manager.update_user_window_offset(user_id, window_id, file_size)
+                except OSError:
+                    pass
 
 
 def run_slack_bot() -> None:
@@ -383,6 +417,9 @@ def run_slack_bot() -> None:
 
         logger.info("Starting Slack bot in Socket Mode...")
         handler = AsyncSocketModeHandler(app, config.slack_app_token)
-        await handler.start_async()
+        try:
+            await handler.start_async()
+        finally:
+            await shutdown_workers()
 
     asyncio.run(_run())

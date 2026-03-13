@@ -11,6 +11,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from ....session import session_manager
 from ....tmux_manager import tmux_manager
 from .interactive_ui import clear_interactive_msg
+from .message_queue import clear_tool_msg_ids
 from .status_polling import clear_status
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ async def cleanup_thread(
         return
     await clear_interactive_msg(client, user_id, thread_ts, channel)
     await clear_status(user_id, thread_ts, client, channel)
+    clear_tool_msg_ids(user_id, thread_ts)
     if kill_window:
         await tmux_manager.kill_window(window_id)
     logger.info(

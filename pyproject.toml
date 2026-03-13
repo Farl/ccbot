@@ -18,6 +18,10 @@ dependencies = [
 ccbot = "ccbot.main:main"
 
 [project.optional-dependencies]
+slack = [
+    "slack-bolt>=1.18.0",
+    "slack-sdk>=3.27.0",
+]
 dev = [
     "pyright>=1.1.0",
     "pytest>=8.0",

@@ -10,6 +10,7 @@ Uses slack-bolt's AsyncApp with Socket Mode for real-time event handling.
 import asyncio
 import logging
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,12 @@ from .handlers.directory_browser import (
 )
 from .handlers.commands import dispatch_command, parse_text_command
 from .handlers.interactive_ui import ACTION_NAV_PREFIX, handle_interactive_ui
-from .handlers.message_queue import build_response_parts, enqueue_content_message, shutdown_workers
+from .handlers.message_queue import (
+    build_response_parts,
+    enqueue_content_message,
+    shutdown_workers,
+)
+from .handlers.message_sender import send_message
 from .handlers.status_polling import record_content_delivery, start_status_polling
 
 logger = logging.getLogger(__name__)
@@ -118,7 +124,9 @@ async def _handle_user_message(
             # Window died — unbind and fall through to directory browser
             logger.info(
                 "Window %s no longer exists for user=%s thread=%s, unbinding",
-                window_id, user_id, thread_ts,
+                window_id,
+                user_id,
+                thread_ts,
             )
             session_manager.unbind_thread(user_id, thread_ts)
         else:
@@ -126,7 +134,8 @@ async def _handle_user_message(
             if not _is_claude_running(window):
                 logger.info(
                     "Claude not running in window %s, restarting for user=%s",
-                    window_id, user_id,
+                    window_id,
+                    user_id,
                 )
                 await _restart_claude_in_window(window)
             success, msg = await session_manager.send_to_window(window_id, text)
@@ -136,14 +145,13 @@ async def _handle_user_message(
                     await say(text=error_text, channel=channel, thread_ts=thread_ts)
                 else:
                     assert app is not None
-                    from .handlers.message_sender import send_message
-                    await send_message(app.client, channel, error_text, thread_ts=thread_ts)
+                    await send_message(
+                        app.client, channel, error_text, thread_ts=thread_ts
+                    )
             return
 
     # No session for this thread — show directory browser
-    logger.debug(
-        "Showing directory browser for user=%s thread=%s", user_id, thread_ts
-    )
+    logger.debug("Showing directory browser for user=%s thread=%s", user_id, thread_ts)
     try:
         # First send a placeholder, then update with browser keyed by msg_ts
         browser = build_directory_browser(user_id)
@@ -177,7 +185,10 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         await say("Send a message to start a Claude Code session.")
         await set_suggested_prompts(
             prompts=[
-                {"title": "Start session", "message": "Start a new Claude Code session"},
+                {
+                    "title": "Start session",
+                    "message": "Start a new Claude Code session",
+                },
             ]
         )
 
@@ -224,7 +235,9 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         parsed = parse_text_command(text)
         if parsed:
             cmd, args = parsed
-            handled = await dispatch_command(client, user_id, channel, thread_ts, cmd, args)
+            handled = await dispatch_command(
+                client, user_id, channel, thread_ts, cmd, args
+            )
             if handled:
                 return
 
@@ -242,7 +255,9 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         message_ts: str = body["message"]["ts"]
         thread_ts: str | None = body["message"].get("thread_ts")
 
-        logger.info("Dir action: %s (user=%s, msg_ts=%s)", action_id, user_id, message_ts)
+        logger.info(
+            "Dir action: %s (user=%s, msg_ts=%s)", action_id, user_id, message_ts
+        )
 
         state = get_browse_state(user_id, msg_ts=message_ts)
         if not state:
@@ -256,7 +271,9 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                 dirs: list[str] = state["dirs"]
                 if 0 <= idx < len(dirs):
                     new_path = current_path / dirs[idx]
-                    browser = build_directory_browser(user_id, new_path, msg_ts=message_ts)
+                    browser = build_directory_browser(
+                        user_id, new_path, msg_ts=message_ts
+                    )
                     resp = await client.chat_update(
                         channel=channel,
                         ts=message_ts,
@@ -265,7 +282,9 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                     )
                     logger.info("chat_update ok=%s for %s", resp.get("ok"), action_id)
             elif action_id == ACTION_DIR_UP:
-                browser = build_directory_browser(user_id, current_path.parent, msg_ts=message_ts)
+                browser = build_directory_browser(
+                    user_id, current_path.parent, msg_ts=message_ts
+                )
                 resp = await client.chat_update(
                     channel=channel,
                     ts=message_ts,
@@ -275,7 +294,9 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                 logger.info("chat_update ok=%s for %s", resp.get("ok"), action_id)
             elif action_id.startswith(ACTION_DIR_PAGE):
                 page = int(action_id[len(ACTION_DIR_PAGE) :])
-                browser = build_directory_browser(user_id, current_path, page, msg_ts=message_ts)
+                browser = build_directory_browser(
+                    user_id, current_path, page, msg_ts=message_ts
+                )
                 resp = await client.chat_update(
                     channel=channel,
                     ts=message_ts,
@@ -289,16 +310,23 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                 effective_ts = thread_ts or message_ts
 
                 # Check for existing sessions in this directory
-                sessions = await session_manager.list_sessions_for_directory(str(current_path))
+                sessions = await session_manager.list_sessions_for_directory(
+                    str(current_path)
+                )
                 if sessions:
                     picker = build_session_picker(
-                        user_id, sessions,
-                        msg_ts=message_ts, cwd=str(current_path),
-                        pending_text=pending_text, thread_ts=effective_ts,
+                        user_id,
+                        sessions,
+                        msg_ts=message_ts,
+                        cwd=str(current_path),
+                        pending_text=pending_text,
+                        thread_ts=effective_ts,
                     )
                     await client.chat_update(
-                        channel=channel, ts=message_ts,
-                        text=picker["text"], blocks=picker["blocks"],
+                        channel=channel,
+                        ts=message_ts,
+                        text=picker["text"],
+                        blocks=picker["blocks"],
                     )
                     return
 
@@ -308,26 +336,40 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                         channel=channel, text=f"\U0001f680 Session: {current_path.name}"
                     )
                     effective_ts = resp.get("ts") or message_ts
-                window_id = await create_session_for_thread(user_id, effective_ts, str(current_path))
+                window_id = await create_session_for_thread(
+                    user_id, effective_ts, str(current_path)
+                )
                 if window_id:
-                    await client.chat_update(channel=channel, ts=message_ts,
-                        text=f"\u2705 Session created: {current_path.name}", blocks=[])
+                    await client.chat_update(
+                        channel=channel,
+                        ts=message_ts,
+                        text=f"\u2705 Session created: {current_path.name}",
+                        blocks=[],
+                    )
                     if pending_text:
                         send_ok, send_msg = await session_manager.send_to_window(
                             window_id, pending_text
                         )
                         if not send_ok:
-                            logger.warning("Failed to forward pending text: %s", send_msg)
+                            logger.warning(
+                                "Failed to forward pending text: %s", send_msg
+                            )
                 else:
-                    await client.chat_update(channel=channel, ts=message_ts,
-                        text="\u274c Failed to create session", blocks=[])
+                    await client.chat_update(
+                        channel=channel,
+                        ts=message_ts,
+                        text="\u274c Failed to create session",
+                        blocks=[],
+                    )
             elif action_id == ACTION_DIR_CANCEL:
                 clear_browse_state(user_id, msg_ts=message_ts)
                 await client.chat_update(
                     channel=channel, ts=message_ts, text="Cancelled.", blocks=[]
                 )
         except Exception as e:
-            logger.error("Dir action error: %s (action=%s)", e, action_id, exc_info=True)
+            logger.error(
+                "Dir action error: %s (action=%s)", e, action_id, exc_info=True
+            )
 
     @slack_app.action(re.compile(r"^sess_"))
     async def handle_sess_action(ack: Any, body: dict[str, Any], client: Any) -> None:
@@ -349,47 +391,72 @@ def _register_handlers(slack_app: AsyncApp) -> None:
 
         try:
             if action_id.startswith(ACTION_SESS_SELECT):
-                idx = int(action_id[len(ACTION_SESS_SELECT):])
+                idx = int(action_id[len(ACTION_SESS_SELECT) :])
                 if idx < 0 or idx >= len(sessions):
                     return
                 session = sessions[idx]
                 clear_session_picker_state(user_id, msg_ts=message_ts)
                 window_id = await create_session_for_thread(
-                    user_id, thread_ts, cwd,
+                    user_id,
+                    thread_ts,
+                    cwd,
                     resume_session_id=session.session_id,
                 )
                 if window_id:
-                    await client.chat_update(channel=channel, ts=message_ts,
-                        text=f"\u2705 Resumed session {session.session_id[:8]}", blocks=[])
+                    await client.chat_update(
+                        channel=channel,
+                        ts=message_ts,
+                        text=f"\u2705 Resumed session {session.session_id[:8]}",
+                        blocks=[],
+                    )
                     if pending_text:
-                        ok, err = await session_manager.send_to_window(window_id, pending_text)
+                        ok, err = await session_manager.send_to_window(
+                            window_id, pending_text
+                        )
                         if not ok:
                             logger.warning("Failed to forward pending text: %s", err)
                 else:
-                    await client.chat_update(channel=channel, ts=message_ts,
-                        text="\u274c Failed to resume session", blocks=[])
+                    await client.chat_update(
+                        channel=channel,
+                        ts=message_ts,
+                        text="\u274c Failed to resume session",
+                        blocks=[],
+                    )
 
             elif action_id == ACTION_SESS_NEW:
                 clear_session_picker_state(user_id, msg_ts=message_ts)
                 window_id = await create_session_for_thread(user_id, thread_ts, cwd)
                 if window_id:
-                    await client.chat_update(channel=channel, ts=message_ts,
-                        text=f"\u2705 New session: {cwd}", blocks=[])
+                    await client.chat_update(
+                        channel=channel,
+                        ts=message_ts,
+                        text=f"\u2705 New session: {cwd}",
+                        blocks=[],
+                    )
                     if pending_text:
-                        ok, err = await session_manager.send_to_window(window_id, pending_text)
+                        ok, err = await session_manager.send_to_window(
+                            window_id, pending_text
+                        )
                         if not ok:
                             logger.warning("Failed to forward pending text: %s", err)
                 else:
-                    await client.chat_update(channel=channel, ts=message_ts,
-                        text="\u274c Failed to create session", blocks=[])
+                    await client.chat_update(
+                        channel=channel,
+                        ts=message_ts,
+                        text="\u274c Failed to create session",
+                        blocks=[],
+                    )
 
             elif action_id == ACTION_SESS_CANCEL:
                 clear_session_picker_state(user_id, msg_ts=message_ts)
-                await client.chat_update(channel=channel, ts=message_ts,
-                    text="Cancelled.", blocks=[])
+                await client.chat_update(
+                    channel=channel, ts=message_ts, text="Cancelled.", blocks=[]
+                )
 
         except Exception as e:
-            logger.error("Sess action error: %s (action=%s)", e, action_id, exc_info=True)
+            logger.error(
+                "Sess action error: %s (action=%s)", e, action_id, exc_info=True
+            )
 
     @slack_app.action("noop")
     async def handle_noop(ack: Any) -> None:
@@ -438,24 +505,36 @@ def _register_handlers(slack_app: AsyncApp) -> None:
     async def slash_esc(ack: Any, body: dict[str, Any], client: Any) -> None:
         await ack()
         await dispatch_command(
-            client, body["user_id"], body["channel_id"],
-            body.get("thread_ts", ""), "esc", [],
+            client,
+            body["user_id"],
+            body["channel_id"],
+            body.get("thread_ts", ""),
+            "esc",
+            [],
         )
 
     @slack_app.command("/unbind")
     async def slash_unbind(ack: Any, body: dict[str, Any], client: Any) -> None:
         await ack()
         await dispatch_command(
-            client, body["user_id"], body["channel_id"],
-            body.get("thread_ts", ""), "unbind", [],
+            client,
+            body["user_id"],
+            body["channel_id"],
+            body.get("thread_ts", ""),
+            "unbind",
+            [],
         )
 
     @slack_app.command("/screenshot")
     async def slash_screenshot(ack: Any, body: dict[str, Any], client: Any) -> None:
         await ack()
         await dispatch_command(
-            client, body["user_id"], body["channel_id"],
-            body.get("thread_ts", ""), "screenshot", [],
+            client,
+            body["user_id"],
+            body["channel_id"],
+            body.get("thread_ts", ""),
+            "screenshot",
+            [],
         )
 
     @slack_app.command("/history")
@@ -463,8 +542,12 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         await ack()
         args = body.get("text", "").split()
         await dispatch_command(
-            client, body["user_id"], body["channel_id"],
-            body.get("thread_ts", ""), "history", args,
+            client,
+            body["user_id"],
+            body["channel_id"],
+            body.get("thread_ts", ""),
+            "history",
+            args,
         )
 
     @slack_app.action(re.compile(r"^hist_"))
@@ -478,15 +561,119 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         user_id: str = body["user"]["id"]
 
         from .handlers.history import parse_history_action_id, send_history
+
         try:
             page, window_id = parse_history_action_id(action_id)
         except (ValueError, IndexError):
             return
 
         await send_history(
-            client, user_id, channel, thread_ts, window_id,
-            page=page, edit_ts=message_ts,
+            client,
+            user_id,
+            channel,
+            thread_ts,
+            window_id,
+            page=page,
+            edit_ts=message_ts,
         )
+
+    @slack_app.event("file_shared")
+    async def handle_file_shared(event: dict[str, Any], client: Any) -> None:
+        """Handle shared files: forward images to Claude, transcribe audio."""
+        user_id: str = event.get("user_id", "")
+        channel: str = event.get("channel_id", "")
+        if not config.is_user_allowed(user_id):
+            return
+
+        file_id: str = event.get("file_id", "")
+        if not file_id:
+            return
+
+        try:
+            info_resp = await client.files_info(file=file_id)
+            file_info = info_resp["file"]
+        except Exception as e:
+            logger.error("Failed to get file info %s: %s", file_id, e)
+            return
+
+        mimetype: str = file_info.get("mimetype", "")
+        download_url: str = file_info.get("url_private_download", "")
+        thread_ts: str = event.get("thread_ts", "")
+        if not download_url:
+            return
+
+        file_bytes = await _download_slack_file(download_url)
+        if file_bytes is None:
+            return
+
+        if mimetype.startswith("image/"):
+            filetype = file_info.get("filetype", "png")
+            await _handle_image(user_id, channel, thread_ts, file_bytes, filetype)
+        elif mimetype.startswith("audio/") or mimetype in ("video/mp4",):
+            await _handle_audio(user_id, channel, thread_ts, file_bytes, client)
+
+
+async def _download_slack_file(url: str) -> bytes | None:
+    """Download a Slack file using the bot token."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.get(
+                url,
+                headers={"Authorization": f"Bearer {config.slack_bot_token}"},
+            )
+            resp.raise_for_status()
+            return resp.content
+    except Exception as e:
+        logger.error("Failed to download Slack file: %s", e)
+        return None
+
+
+async def _handle_image(
+    user_id: str,
+    channel: str,
+    thread_ts: str,
+    image_bytes: bytes,
+    filetype: str,
+) -> None:
+    """Save image to a temp file and forward the path to Claude via tmux."""
+    window_id = session_manager.resolve_window_for_thread(user_id, thread_ts)
+    if not window_id:
+        return
+    with tempfile.NamedTemporaryFile(suffix=f".{filetype}", delete=False) as f:
+        f.write(image_bytes)
+        tmp_path = f.name
+    try:
+        ok, msg = await session_manager.send_to_window(window_id, tmp_path)
+        if not ok:
+            logger.warning("Failed to forward image path to Claude: %s", msg)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+async def _handle_audio(
+    user_id: str,
+    channel: str,
+    thread_ts: str,
+    audio_bytes: bytes,
+    client: Any,
+) -> None:
+    """Transcribe audio and forward the text to Claude."""
+    from ...transcribe import (
+        transcribe_voice,
+    )  # 3 dots = src/ccbot/ from transports/slack/
+
+    try:
+        text = await transcribe_voice(audio_bytes)
+    except Exception as e:
+        logger.error("Transcription failed: %s", e)
+        assert app is not None
+        await send_message(
+            app.client, channel, f"Transcription failed: {e}", thread_ts=thread_ts
+        )
+        return
+    await _handle_user_message(user_id, channel, thread_ts, text, client)
 
 
 async def handle_new_message(msg: NewMessage) -> None:
@@ -525,7 +712,9 @@ async def handle_new_message(msg: NewMessage) -> None:
             if session and session.file_path:
                 try:
                     file_size = Path(session.file_path).stat().st_size
-                    session_manager.update_user_window_offset(user_id, window_id, file_size)
+                    session_manager.update_user_window_offset(
+                        user_id, window_id, file_size
+                    )
                 except OSError:
                     pass
 

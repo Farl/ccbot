@@ -22,11 +22,25 @@ All in `src/ccbot/transports/slack/bot.py`:
 
 After each successful `chat_update` confirming session creation:
 
+**Touch point 1** (`handle_dir_action` — `ACTION_DIR_CONFIRM`): uses `current_path` (Path). Must be placed after the `if not thread_ts` block so `effective_ts` reflects the actual thread root.
+
 ```python
 display_path = str(current_path).replace(str(Path.home()), "~")
 try:
     await client.assistant_threads_setTitle(
         channel_id=channel, thread_ts=effective_ts, title=display_path
+    )
+except Exception:
+    logger.debug("Failed to set thread title", exc_info=True)
+```
+
+**Touch points 2 & 3** (`handle_sess_action`): uses `cwd` (str), not `current_path`.
+
+```python
+display_path = cwd.replace(str(Path.home()), "~")
+try:
+    await client.assistant_threads_setTitle(
+        channel_id=channel, thread_ts=thread_ts, title=display_path
     )
 except Exception:
     logger.debug("Failed to set thread title", exc_info=True)

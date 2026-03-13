@@ -44,6 +44,7 @@ _MAX_PART_LENGTH = 3000  # headroom for mrkdwn expansion at send layer
 # Content-type formatting
 # ---------------------------------------------------------------------------
 
+
 def build_response_parts(
     text: str,
     is_complete: bool,
@@ -80,6 +81,7 @@ def build_response_parts(
 # Queue data model
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class MessageTask:
     """Message task for Slack queue processing."""
@@ -106,6 +108,7 @@ _tool_msg_ids: dict[tuple[str, str, str], str] = {}
 # ---------------------------------------------------------------------------
 # Merge logic
 # ---------------------------------------------------------------------------
+
 
 def _can_merge_tasks(base: MessageTask, candidate: MessageTask) -> bool:
     """Return True if candidate can be merged into base."""
@@ -185,6 +188,7 @@ async def _merge_content_tasks(
 # ---------------------------------------------------------------------------
 # Task processing
 # ---------------------------------------------------------------------------
+
 
 async def _process_content_task(
     client: AsyncWebClient,
@@ -284,6 +288,7 @@ async def _check_and_send_status(
 # Queue worker and lifecycle
 # ---------------------------------------------------------------------------
 
+
 async def _queue_worker(client: AsyncWebClient, user_id: str) -> None:
     """Process message tasks for one user sequentially."""
     queue = _message_queues[user_id]
@@ -315,9 +320,7 @@ def get_or_create_queue(
     if user_id not in _message_queues:
         _message_queues[user_id] = asyncio.Queue()
         _queue_locks[user_id] = asyncio.Lock()
-        _queue_workers[user_id] = asyncio.create_task(
-            _queue_worker(client, user_id)
-        )
+        _queue_workers[user_id] = asyncio.create_task(_queue_worker(client, user_id))
     return _message_queues[user_id]
 
 

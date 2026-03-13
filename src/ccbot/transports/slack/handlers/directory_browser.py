@@ -106,7 +106,9 @@ def build_session_picker(
         "thread_ts": thread_ts,
     }
 
-    header = f"*Resume a session in `{cwd}`?*" if cwd else "*Resume an existing session?*"
+    header = (
+        f"*Resume a session in `{cwd}`?*" if cwd else "*Resume an existing session?*"
+    )
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": header}}
     ]
@@ -120,32 +122,41 @@ def build_session_picker(
             )
         except (OSError, AttributeError):
             mtime = "?"
-        blocks.append({
-            "type": "actions",
-            "elements": [{
-                "type": "button",
-                "text": {"type": "plain_text", "text": f"\u25b6 {short_id} ({mtime})"},
-                "action_id": f"{ACTION_SESS_SELECT}{i}",
-            }],
-        })
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": f"\u25b6 {short_id} ({mtime})",
+                        },
+                        "action_id": f"{ACTION_SESS_SELECT}{i}",
+                    }
+                ],
+            }
+        )
 
-    blocks.append({
-        "type": "actions",
-        "elements": [
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "\u2728 New session"},
-                "action_id": ACTION_SESS_NEW,
-                "style": "primary",
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Cancel"},
-                "action_id": ACTION_SESS_CANCEL,
-                "style": "danger",
-            },
-        ],
-    })
+    blocks.append(
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "\u2728 New session"},
+                    "action_id": ACTION_SESS_NEW,
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Cancel"},
+                    "action_id": ACTION_SESS_CANCEL,
+                    "style": "danger",
+                },
+            ],
+        }
+    )
 
     return {"text": "Resume session or start new?", "blocks": blocks}
 
@@ -315,7 +326,9 @@ async def create_session_for_thread(
     session_manager.bind_thread(user_id, thread_ts, window_id, window_name)
 
     hook_timeout = 15.0 if resume_session_id else 10.0
-    hook_ok = await session_manager.wait_for_session_map_entry(window_id, timeout=hook_timeout)
+    hook_ok = await session_manager.wait_for_session_map_entry(
+        window_id, timeout=hook_timeout
+    )
 
     if resume_session_id:
         ws = session_manager.get_window_state(window_id)
@@ -323,7 +336,8 @@ async def create_session_for_thread(
             # Hook timed out — manually populate window_state
             logger.warning(
                 "Hook timeout for resume window %s, manually setting session_id=%s",
-                window_id, resume_session_id,
+                window_id,
+                resume_session_id,
             )
             if ws:
                 ws.session_id = resume_session_id
@@ -333,7 +347,9 @@ async def create_session_for_thread(
         elif ws and ws.session_id != resume_session_id:
             logger.info(
                 "Resume override: window %s session_id %s -> %s",
-                window_id, ws.session_id, resume_session_id,
+                window_id,
+                ws.session_id,
+                resume_session_id,
             )
             ws.session_id = resume_session_id
             session_manager._save_state()
@@ -341,6 +357,9 @@ async def create_session_for_thread(
     logger.info(
         "Session %s: user=%s, thread=%s, window=%s (%s)",
         "resumed" if resume_session_id else "created",
-        user_id, thread_ts, window_id, window_name,
+        user_id,
+        thread_ts,
+        window_id,
+        window_name,
     )
     return window_id

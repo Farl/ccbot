@@ -72,7 +72,9 @@ async def _cmd_esc(
     """Send Escape key to the bound tmux window."""
     window_id = _resolve_window(user_id, thread_ts)
     if not window_id:
-        await send_message(client, channel, "No active session in this thread.", thread_ts=thread_ts)
+        await send_message(
+            client, channel, "No active session in this thread.", thread_ts=thread_ts
+        )
         return
     await tmux_manager.send_keys(window_id, "Escape", enter=False, literal=False)
     await send_message(client, channel, "↩ Escape sent.", thread_ts=thread_ts)
@@ -84,9 +86,12 @@ async def _cmd_unbind(
     """Kill window and unbind thread."""
     window_id = _resolve_window(user_id, thread_ts)
     if not window_id:
-        await send_message(client, channel, "No active session in this thread.", thread_ts=thread_ts)
+        await send_message(
+            client, channel, "No active session in this thread.", thread_ts=thread_ts
+        )
         return
     from .cleanup import cleanup_thread
+
     await cleanup_thread(user_id, thread_ts, client, channel, kill_window=True)
     await send_message(client, channel, "Session unbound.", thread_ts=thread_ts)
 
@@ -97,24 +102,32 @@ async def _cmd_screenshot(
     """Capture terminal as PNG and upload to Slack."""
     window_id = _resolve_window(user_id, thread_ts)
     if not window_id:
-        await send_message(client, channel, "No active session in this thread.", thread_ts=thread_ts)
+        await send_message(
+            client, channel, "No active session in this thread.", thread_ts=thread_ts
+        )
         return
 
     pane_text = await tmux_manager.capture_pane(window_id)
     if not pane_text:
-        await send_message(client, channel, "Failed to capture terminal.", thread_ts=thread_ts)
+        await send_message(
+            client, channel, "Failed to capture terminal.", thread_ts=thread_ts
+        )
         return
 
     try:
         from ....screenshot import text_to_image  # 4 dots = src/ccbot/
+
         png_bytes = await text_to_image(pane_text)
     except Exception as e:
         logger.error("Screenshot render failed: %s", e)
-        await send_message(client, channel, f"Screenshot failed: {e}", thread_ts=thread_ts)
+        await send_message(
+            client, channel, f"Screenshot failed: {e}", thread_ts=thread_ts
+        )
         return
 
     try:
         import httpx
+
         upload_resp = await client.files_getUploadURLExternal(
             filename="screenshot.png",
             length=len(png_bytes),
@@ -149,7 +162,10 @@ async def _cmd_history(
     """Show paginated session history."""
     window_id = _resolve_window(user_id, thread_ts)
     if not window_id:
-        await send_message(client, channel, "No active session in this thread.", thread_ts=thread_ts)
+        await send_message(
+            client, channel, "No active session in this thread.", thread_ts=thread_ts
+        )
         return
     from .history import send_history
+
     await send_history(client, user_id, channel, thread_ts, window_id, page=page)

@@ -49,7 +49,10 @@ class TestCodeBlock:
 
 class TestLinks:
     def test_markdown_link(self) -> None:
-        assert to_mrkdwn("[click here](https://example.com)") == "<https://example.com|click here>"
+        assert (
+            to_mrkdwn("[click here](https://example.com)")
+            == "<https://example.com|click here>"
+        )
 
     def test_link_in_sentence(self) -> None:
         result = to_mrkdwn("see [docs](https://docs.io) for info")

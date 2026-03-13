@@ -131,7 +131,9 @@ async def status_poll_loop(bot: Bot) -> None:
             if now - last_topic_check >= TOPIC_CHECK_INTERVAL:
                 last_topic_check = now
                 for uid_s, tid_s, wid in list(session_manager.iter_thread_bindings()):
-                    # Convert str IDs to int for Telegram API calls
+                    # Skip non-Telegram bindings (e.g. Slack user/thread IDs)
+                    if not uid_s.isdigit() or not tid_s.isdigit():
+                        continue
                     uid_i = int(uid_s)
                     tid_i = int(tid_s)
                     try:
@@ -168,7 +170,9 @@ async def status_poll_loop(bot: Bot) -> None:
                         )
 
             for uid_s, tid_s, wid in list(session_manager.iter_thread_bindings()):
-                # Convert str IDs to int for Telegram API calls
+                # Skip non-Telegram bindings (e.g. Slack user IDs)
+                if not uid_s.isdigit():
+                    continue
                 uid_i = int(uid_s)
                 tid_i = int(tid_s)
                 try:

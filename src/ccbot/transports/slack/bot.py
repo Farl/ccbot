@@ -10,7 +10,7 @@ Uses slack-bolt's AsyncApp with Socket Mode for real-time event handling.
 import asyncio
 import logging
 import re
-import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,7 @@ from ...config import config
 from ...session import session_manager
 from ...session_monitor import NewMessage, SessionMonitor
 from ...tmux_manager import TmuxWindow, tmux_manager
+from ...utils import ccbot_dir
 from .handlers.directory_browser import (
     ACTION_DIR_CANCEL,
     ACTION_DIR_CONFIRM,
@@ -170,6 +171,37 @@ async def _handle_user_message(
         logger.error("Failed to send directory browser: %s", e)
 
 
+async def _dispatch_incoming(
+    user_id: str,
+    channel: str,
+    thread_ts: str,
+    text: str,
+    files: list[dict[str, Any]],
+    client: Any,
+    say: Any = None,
+) -> None:
+    """Route an incoming message to the appropriate handler.
+
+    Shared by assistant.user_message, message event, and file_share fallback.
+    """
+    if files:
+        await _handle_message_files(
+            user_id, channel, thread_ts, text, files, client, say
+        )
+        return
+
+    parsed = parse_text_command(text)
+    if parsed:
+        cmd, args = parsed
+        handled = await dispatch_command(
+            client, user_id, channel, thread_ts, cmd, args
+        )
+        if handled:
+            return
+
+    await _handle_user_message(user_id, channel, thread_ts, text, client, say)
+
+
 def _register_handlers(slack_app: AsyncApp) -> None:
     """Register all event and action handlers on the app."""
 
@@ -204,18 +236,22 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         channel: str = payload.get("channel", "")
         thread_ts: str = payload.get("thread_ts") or payload.get("ts", "")
         text: str = payload.get("text", "")
+        files: list[dict[str, Any]] = payload.get("files", [])
 
         logger.debug(
-            "Assistant message: user=%s channel=%s thread=%s text=%s",
+            "Assistant message: user=%s channel=%s thread=%s text=%s files=%d",
             user_id,
             channel,
             thread_ts,
             text[:50],
+            len(files),
         )
 
         await set_status(status="processing...")
         try:
-            await _handle_user_message(user_id, channel, thread_ts, text, client, say)
+            await _dispatch_incoming(
+                user_id, channel, thread_ts, text, files, client, say
+            )
         finally:
             await set_status("")
 
@@ -224,24 +260,33 @@ def _register_handlers(slack_app: AsyncApp) -> None:
     # --- Message handler for all DMs (assistant and non-assistant) ---
     @slack_app.event("message")
     async def handle_message(event: dict[str, Any], say: Any, client: Any) -> None:
+        """Handles non-assistant DMs. Assistant threads go through handle_assistant_message."""
         if event.get("bot_id") is not None or event.get("subtype") == "bot_message":
             return
         user_id: str = event.get("user", "")
         channel: str = event.get("channel", "")
         thread_ts: str = event.get("thread_ts") or event.get("ts", "")
         text: str = event.get("text", "")
+        files: list[dict[str, Any]] = event.get("files", [])
+        await _dispatch_incoming(
+            user_id, channel, thread_ts, text, files, client, say
+        )
 
-        # Intercept text commands before forwarding to Claude
-        parsed = parse_text_command(text)
-        if parsed:
-            cmd, args = parsed
-            handled = await dispatch_command(
-                client, user_id, channel, thread_ts, cmd, args
-            )
-            if handled:
-                return
-
-        await _handle_user_message(user_id, channel, thread_ts, text, client, say)
+    @slack_app.event({"type": "message", "subtype": "file_share"})
+    async def handle_file_share(
+        event: dict[str, Any], say: Any, client: Any
+    ) -> None:
+        """Fallback for file_share events not caught by assistant handler."""
+        user_id: str = event.get("user", "")
+        channel: str = event.get("channel", "")
+        thread_ts: str = event.get("thread_ts") or event.get("ts", "")
+        text: str = event.get("text", "")
+        files: list[dict[str, Any]] = event.get("files", [])
+        if not files:
+            return
+        await _dispatch_incoming(
+            user_id, channel, thread_ts, text, files, client, say
+        )
 
     # --- Action handlers (work for both assistant and regular threads) ---
 
@@ -577,44 +622,11 @@ def _register_handlers(slack_app: AsyncApp) -> None:
             edit_ts=message_ts,
         )
 
-    @slack_app.event("file_shared")
-    async def handle_file_shared(event: dict[str, Any], client: Any) -> None:
-        """Handle shared files: forward images to Claude, transcribe audio."""
-        user_id: str = event.get("user_id", "")
-        channel: str = event.get("channel_id", "")
-        if not config.is_user_allowed(user_id):
-            return
-
-        file_id: str = event.get("file_id", "")
-        if not file_id:
-            return
-
-        try:
-            info_resp = await client.files_info(file=file_id)
-            file_info = info_resp["file"]
-        except Exception as e:
-            logger.error("Failed to get file info %s: %s", file_id, e)
-            return
-
-        mimetype: str = file_info.get("mimetype", "")
-        download_url: str = file_info.get("url_private_download", "")
-        thread_ts: str = event.get("thread_ts", "")
-        if not download_url:
-            return
-
-        file_bytes = await _download_slack_file(download_url)
-        if file_bytes is None:
-            return
-
-        if mimetype.startswith("image/"):
-            filetype = file_info.get("filetype", "png")
-            await _handle_image(user_id, channel, thread_ts, file_bytes, filetype)
-        elif mimetype.startswith("audio/") or mimetype in ("video/mp4",):
-            await _handle_audio(user_id, channel, thread_ts, file_bytes, client)
+_MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 
 
 async def _download_slack_file(url: str) -> bytes | None:
-    """Download a Slack file using the bot token."""
+    """Download a Slack file using the bot token (max 20 MB)."""
     import httpx
 
     try:
@@ -624,32 +636,82 @@ async def _download_slack_file(url: str) -> bytes | None:
                 headers={"Authorization": f"Bearer {config.slack_bot_token}"},
             )
             resp.raise_for_status()
+            if len(resp.content) > _MAX_FILE_SIZE:
+                logger.warning(
+                    "Slack file too large (%d bytes), skipping", len(resp.content)
+                )
+                return None
             return resp.content
     except Exception as e:
         logger.error("Failed to download Slack file: %s", e)
         return None
 
 
-async def _handle_image(
+# --- Image directory for incoming photos (matches Telegram convention) ---
+_IMAGES_DIR = ccbot_dir() / "images"
+_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+async def _handle_message_files(
     user_id: str,
     channel: str,
     thread_ts: str,
-    image_bytes: bytes,
-    filetype: str,
+    text: str,
+    files: list[dict[str, Any]],
+    client: Any,
+    say: Any = None,
 ) -> None:
-    """Save image to a temp file and forward the path to Claude via tmux."""
+    """Process file attachments from a Slack message event.
+
+    Images are saved to ~/.ccbot/images/ and forwarded as file paths.
+    Audio is transcribed and forwarded as text.
+    Any accompanying text is included alongside the file.
+    """
+    if not config.is_user_allowed(user_id):
+        return
+
+    logger.info(
+        "Processing %d file(s) from user=%s thread=%s",
+        len(files), user_id, thread_ts,
+    )
+
     window_id = session_manager.resolve_window_for_thread(user_id, thread_ts)
     if not window_id:
+        # No session bound — forward text only to trigger directory browser
+        if text:
+            await _handle_user_message(user_id, channel, thread_ts, text, client, say)
         return
-    with tempfile.NamedTemporaryFile(suffix=f".{filetype}", delete=False) as f:
-        f.write(image_bytes)
-        tmp_path = f.name
-    try:
-        ok, msg = await session_manager.send_to_window(window_id, tmp_path)
-        if not ok:
-            logger.warning("Failed to forward image path to Claude: %s", msg)
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+
+    for file_info in files:
+        mimetype: str = file_info.get("mimetype", "")
+        download_url: str = file_info.get("url_private_download", "")
+        if not download_url:
+            continue
+
+        file_bytes = await _download_slack_file(download_url)
+        if file_bytes is None:
+            continue
+
+        if mimetype.startswith("image/"):
+            filetype = file_info.get("filetype", "png")
+            file_id = file_info.get("id", "unknown")
+            filename = f"{int(time.time())}_{file_id}.{filetype}"
+            file_path = _IMAGES_DIR / filename
+            file_path.write_bytes(file_bytes)
+
+            if text:
+                msg_text = f"{text}\n\n(image attached: {file_path})"
+            else:
+                msg_text = f"(image attached: {file_path})"
+
+            ok, err = await session_manager.send_to_window(window_id, msg_text)
+            if not ok:
+                logger.warning("Failed to forward image to Claude: %s", err)
+            # Only include text with the first file
+            text = ""
+
+        elif mimetype.startswith("audio/") or mimetype in ("video/mp4",):
+            await _handle_audio(user_id, channel, thread_ts, file_bytes, client)
 
 
 async def _handle_audio(
@@ -660,9 +722,7 @@ async def _handle_audio(
     client: Any,
 ) -> None:
     """Transcribe audio and forward the text to Claude."""
-    from ...transcribe import (
-        transcribe_voice,
-    )  # 3 dots = src/ccbot/ from transports/slack/
+    from ...transcribe import transcribe_voice
 
     try:
         text = await transcribe_voice(audio_bytes)

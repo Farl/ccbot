@@ -3,7 +3,7 @@
 [中文文档](README_CN.md)
 [Русская документация](README_RU.md)
 
-Control Claude Code sessions remotely via Telegram — monitor, interact, and manage AI coding sessions running in tmux.
+Control Claude Code sessions remotely via Telegram or Slack — monitor, interact, and manage AI coding sessions running in tmux.
 
 https://github.com/user-attachments/assets/15ffb38e-5eb9-4720-93b9-412e4961dc93
 
@@ -63,28 +63,43 @@ uv sync
 
 ## Configuration
 
-**1. Create a Telegram bot and enable Threaded Mode:**
+### Telegram Setup
 
 1. Chat with [@BotFather](https://t.me/BotFather) to create a new bot and get your bot token
 2. Open @BotFather's profile page, tap **Open App** to launch the mini app
 3. Select your bot, then go to **Settings** > **Bot Settings**
 4. Enable **Threaded Mode**
 
-**2. Configure environment variables:**
+### Slack Setup
+
+1. Create a Slack App at [api.slack.com/apps](https://api.slack.com/apps) with Socket Mode enabled
+2. Add Bot Token Scopes: `chat:write`, `im:history`, `im:read`, `im:write`, `files:read`, `assistant:write`
+3. Subscribe to Events: `message.im`
+4. Install to your workspace and get the Bot Token (`xoxb-...`) and App Token (`xapp-...`)
+
+### Environment Variables
 
 Create `~/.ccbot/.env`:
 
 ```ini
+# For Telegram transport
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 ALLOWED_USERS=your_telegram_user_id
+
+# For Slack transport
+SLACK_BOT_TOKEN=xoxb-your-bot-token
+SLACK_APP_TOKEN=xapp-your-app-token
+ALLOWED_USERS=U090KUZEKRQ
 ```
 
-**Required:**
+**Required (per transport):**
 
-| Variable             | Description                       |
-| -------------------- | --------------------------------- |
-| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather         |
-| `ALLOWED_USERS`      | Comma-separated Telegram user IDs |
+| Variable             | Description                                    |
+| -------------------- | ---------------------------------------------- |
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather (Telegram)           |
+| `SLACK_BOT_TOKEN`    | Bot token from Slack App (Slack)               |
+| `SLACK_APP_TOKEN`    | App-level token with Socket Mode (Slack)       |
+| `ALLOWED_USERS`      | Comma-separated user IDs (Telegram or Slack)   |
 
 **Optional:**
 
@@ -142,12 +157,16 @@ This writes window-session mappings to `$CCBOT_DIR/session_map.json` (`~/.ccbot/
 ## Usage
 
 ```bash
-# If installed via uv tool / pipx
+# Telegram (default)
 ccbot
-
-# If installed from source
 uv run ccbot
+
+# Slack
+ccbot --transport slack
+uv run ccbot --transport slack
 ```
+
+Telegram and Slack transports run as **separate processes**. To run both simultaneously, start each in its own terminal or tmux window.
 
 ### Commands
 
@@ -257,32 +276,26 @@ The window must be in the `ccbot` tmux session (configurable via `TMUX_SESSION_N
 
 ```
 src/ccbot/
-├── __init__.py            # Package entry point
-├── main.py                # CLI dispatcher (hook subcommand + bot bootstrap)
+├── main.py                # CLI dispatcher (--transport telegram|slack)
 ├── hook.py                # Hook subcommand for session tracking (+ --install)
 ├── config.py              # Configuration from environment variables
-├── bot.py                 # Telegram bot setup, command handlers, topic routing
-├── session.py             # Session management, state persistence, message history
-├── session_monitor.py     # JSONL file monitoring (polling + change detection)
-├── monitor_state.py       # Monitor state persistence (byte offsets)
-├── transcript_parser.py   # Claude Code JSONL transcript parsing
-├── terminal_parser.py     # Terminal pane parsing (interactive UI + status line)
-├── html_converter.py      # Markdown → Telegram HTML conversion + HTML-aware splitting
+├── session.py             # Session management, state persistence (shared)
+├── session_monitor.py     # JSONL file monitoring (shared)
+├── tmux_manager.py        # Tmux window management (shared)
+├── transcript_parser.py   # Claude Code JSONL transcript parsing (shared)
+├── terminal_parser.py     # Terminal pane parsing (shared)
 ├── screenshot.py          # Terminal text → PNG image with ANSI color support
 ├── transcribe.py          # Voice-to-text transcription via OpenAI API
-├── utils.py               # Shared utilities (atomic JSON writes, JSONL helpers)
-├── tmux_manager.py        # Tmux window management (list, create, send keys, kill)
-├── fonts/                 # Bundled fonts for screenshot rendering
-└── handlers/
-    ├── __init__.py        # Handler module exports
-    ├── callback_data.py   # Callback data constants (CB_* prefixes)
-    ├── directory_browser.py # Directory browser inline keyboard UI
-    ├── history.py         # Message history pagination
-    ├── interactive_ui.py  # Interactive UI handling (AskUser, ExitPlan, Permissions)
-    ├── message_queue.py   # Per-user message queue + worker (merge, rate limit)
-    ├── message_sender.py  # safe_reply / safe_edit / safe_send helpers
-    ├── response_builder.py # Response message building (format tool_use, thinking, etc.)
-    └── status_polling.py  # Terminal status line polling
+├── transports/
+│   ├── telegram/
+│   │   ├── bot.py         # Telegram bot setup, topic routing
+│   │   └── handlers/      # Telegram-specific handlers
+│   └── slack/
+│       ├── bot.py         # Slack bot (Socket Mode + Assistants framework)
+│       ├── formatter.py   # Markdown → Slack mrkdwn conversion
+│       ├── splitter.py    # Message splitting for Slack's 3000 char limit
+│       └── handlers/      # Slack-specific handlers
+└── ...
 ```
 
 ## Troubleshooting

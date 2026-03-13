@@ -37,22 +37,28 @@ def build_history_nav_blocks(
 
     elements: list[dict[str, Any]] = []
     if page > 0:
-        elements.append({
+        elements.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "◀ Older"},
+                "action_id": f"hist_prev_{page}_{window_id}",
+            }
+        )
+    elements.append(
+        {
             "type": "button",
-            "text": {"type": "plain_text", "text": "◀ Older"},
-            "action_id": f"hist_prev_{page}_{window_id}",
-        })
-    elements.append({
-        "type": "button",
-        "text": {"type": "plain_text", "text": f"{page + 1}/{total_pages}"},
-        "action_id": "noop",
-    })
+            "text": {"type": "plain_text", "text": f"{page + 1}/{total_pages}"},
+            "action_id": "noop",
+        }
+    )
     if page < total_pages - 1:
-        elements.append({
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Newer ▶"},
-            "action_id": f"hist_next_{page}_{window_id}",
-        })
+        elements.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Newer ▶"},
+                "action_id": f"hist_next_{page}_{window_id}",
+            }
+        )
     return [{"type": "actions", "elements": elements}]
 
 
@@ -137,5 +143,6 @@ async def send_history(
     if edit_ts:
         await edit_message(client, channel, edit_ts, text, blocks=nav_blocks or None)
     else:
-        await send_message(client, channel, text, thread_ts=thread_ts,
-                           blocks=nav_blocks or None)
+        await send_message(
+            client, channel, text, thread_ts=thread_ts, blocks=nav_blocks or None
+        )

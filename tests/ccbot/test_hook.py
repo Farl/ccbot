@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from ccbot.hook import _UUID_RE, _is_hook_installed, hook_main
+from ccbot.hook import _UUID_RE, _find_existing_hook, hook_main
 
 
 class TestUuidRegex:
@@ -36,7 +36,7 @@ class TestUuidRegex:
         assert _UUID_RE.match(value) is None
 
 
-class TestIsHookInstalled:
+class TestFindExistingHook:
     def test_hook_present(self) -> None:
         settings = {
             "hooks": {
@@ -49,10 +49,13 @@ class TestIsHookInstalled:
                 ]
             }
         }
-        assert _is_hook_installed(settings) is True
+        result = _find_existing_hook(settings)
+        assert result is not None
+        _entry, hook_dict = result
+        assert hook_dict["command"] == "ccbot hook"
 
     def test_no_hooks_key(self) -> None:
-        assert _is_hook_installed({}) is False
+        assert _find_existing_hook({}) is None
 
     def test_different_hook_command(self) -> None:
         settings = {
@@ -62,7 +65,7 @@ class TestIsHookInstalled:
                 ]
             }
         }
-        assert _is_hook_installed(settings) is False
+        assert _find_existing_hook(settings) is None
 
     def test_full_path_matches(self) -> None:
         settings = {
@@ -80,7 +83,10 @@ class TestIsHookInstalled:
                 ]
             }
         }
-        assert _is_hook_installed(settings) is True
+        result = _find_existing_hook(settings)
+        assert result is not None
+        _entry, hook_dict = result
+        assert hook_dict["command"] == "/usr/bin/ccbot hook"
 
 
 class TestHookMainValidation:

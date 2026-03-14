@@ -1,8 +1,9 @@
 # CCBot
 
 [中文文档](README_CN.md)
+[Русская документация](README_RU.md)
 
-Control Claude Code sessions remotely via Telegram — monitor, interact, and manage AI coding sessions running in tmux.
+Control Claude Code sessions remotely via Telegram or Slack — monitor, interact, and manage AI coding sessions running in tmux.
 
 https://github.com/user-attachments/assets/15ffb38e-5eb9-4720-93b9-412e4961dc93
 
@@ -25,9 +26,11 @@ In fact, CCBot itself was built this way — iterating on itself through Claude 
 - **Topic-based sessions** — Each Telegram topic maps 1:1 to a tmux window and Claude session
 - **Real-time notifications** — Get Telegram messages for assistant responses, thinking content, tool use/result, and local command output
 - **Interactive UI** — Navigate AskUserQuestion, ExitPlanMode, and Permission Prompts via inline keyboard
+- **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Send messages** — Forward text to Claude Code via tmux keystrokes
 - **Slash command forwarding** — Send any `/command` directly to Claude Code (e.g. `/clear`, `/compact`, `/cost`)
 - **Create new sessions** — Start Claude Code sessions from Telegram via directory browser
+- **Resume sessions** — Pick up where you left off by resuming an existing Claude session in a directory
 - **Kill sessions** — Close a topic to auto-kill the associated tmux window
 - **Message history** — Browse conversation history with pagination (newest first)
 - **Hook-based session tracking** — Auto-associates tmux windows with Claude sessions via `SessionStart` hook
@@ -60,28 +63,43 @@ uv sync
 
 ## Configuration
 
-**1. Create a Telegram bot and enable Threaded Mode:**
+### Telegram Setup
 
 1. Chat with [@BotFather](https://t.me/BotFather) to create a new bot and get your bot token
 2. Open @BotFather's profile page, tap **Open App** to launch the mini app
 3. Select your bot, then go to **Settings** > **Bot Settings**
 4. Enable **Threaded Mode**
 
-**2. Configure environment variables:**
+### Slack Setup
+
+1. Create a Slack App at [api.slack.com/apps](https://api.slack.com/apps) with Socket Mode enabled
+2. Add Bot Token Scopes: `chat:write`, `im:history`, `im:read`, `im:write`, `files:read`, `assistant:write`
+3. Subscribe to Events: `message.im`
+4. Install to your workspace and get the Bot Token (`xoxb-...`) and App Token (`xapp-...`)
+
+### Environment Variables
 
 Create `~/.ccbot/.env`:
 
 ```ini
+# For Telegram transport
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 ALLOWED_USERS=your_telegram_user_id
+
+# For Slack transport
+SLACK_BOT_TOKEN=xoxb-your-bot-token
+SLACK_APP_TOKEN=xapp-your-app-token
+ALLOWED_USERS=U090KUZEKRQ
 ```
 
-**Required:**
+**Required (per transport):**
 
-| Variable             | Description                       |
-| -------------------- | --------------------------------- |
-| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather         |
-| `ALLOWED_USERS`      | Comma-separated Telegram user IDs |
+| Variable             | Description                                    |
+| -------------------- | ---------------------------------------------- |
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather (Telegram)           |
+| `SLACK_BOT_TOKEN`    | Bot token from Slack App (Slack)               |
+| `SLACK_APP_TOKEN`    | App-level token with Socket Mode (Slack)       |
+| `ALLOWED_USERS`      | Comma-separated user IDs (Telegram or Slack)   |
 
 **Optional:**
 
@@ -92,6 +110,11 @@ ALLOWED_USERS=your_telegram_user_id
 | `CLAUDE_COMMAND`        | `claude`   | Command to run in new windows                    |
 | `MONITOR_POLL_INTERVAL` | `2.0`      | Polling interval in seconds                      |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Show hidden (dot) directories in directory browser |
+| `OPENAI_API_KEY` | _(none)_ | OpenAI API key for voice message transcription |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI API base URL (for proxies or compatible APIs) |
+
+Message formatting is always HTML via `chatgpt-md-converter` (`chatgpt_md_converter` package).
+There is no runtime formatter switch to MarkdownV2.
 
 > If running on a VPS where there's no interactive terminal to approve permissions, consider:
 >
@@ -99,7 +122,13 @@ ALLOWED_USERS=your_telegram_user_id
 > CLAUDE_COMMAND=IS_SANDBOX=1 claude --dangerously-skip-permissions
 > ```
 
-## Hook Setup (Recommended)
+> If running ccbot **inside a Claude Code session** (e.g. during development), child Claude processes will fail with "cannot be launched inside another Claude Code session". Fix:
+>
+> ```
+> CLAUDE_COMMAND=env -u CLAUDECODE claude
+> ```
+
+## Hook Setup (Required)
 
 Auto-install via CLI:
 
@@ -123,15 +152,21 @@ Or manually add to `~/.claude/settings.json`:
 
 This writes window-session mappings to `$CCBOT_DIR/session_map.json` (`~/.ccbot/` by default), so the bot automatically tracks which Claude session is running in each tmux window — even after `/clear` or session restarts.
 
+**Without the hook, ccbot cannot monitor Claude sessions and no messages will be delivered.**
+
 ## Usage
 
 ```bash
-# If installed via uv tool / pipx
+# Telegram (default)
 ccbot
-
-# If installed from source
 uv run ccbot
+
+# Slack
+ccbot --transport slack
+uv run ccbot --transport slack
 ```
+
+Telegram and Slack transports run as **separate processes**. To run both simultaneously, start each in its own terminal or tmux window.
 
 ### Commands
 
@@ -165,11 +200,12 @@ Any unrecognized `/command` is also forwarded to Claude Code as-is (e.g. `/revie
 1. Create a new topic in the Telegram group
 2. Send any message in the topic
 3. A directory browser appears — select the project directory
-4. A tmux window is created, `claude` starts, and your pending message is forwarded
+4. If the directory has existing Claude sessions, a session picker appears — choose one to resume or start fresh
+5. A tmux window is created, `claude` starts (with `--resume` if resuming), and your pending message is forwarded
 
 **Sending messages:**
 
-Once a topic is bound to a session, just send text in that topic — it gets forwarded to Claude Code via tmux keystrokes.
+Once a topic is bound to a session, just send text or voice messages in that topic — text gets forwarded to Claude Code via tmux keystrokes, and voice messages are automatically transcribed and forwarded as text.
 
 **Killing a session:**
 
@@ -204,6 +240,10 @@ The monitor polls session JSONL files every 2 seconds and sends notifications fo
 
 Notifications are delivered to the topic bound to the session's window.
 
+Formatting note:
+- Telegram messages are rendered with parse mode `HTML` using `chatgpt-md-converter`
+- Long messages are split with HTML tag awareness to preserve code blocks and formatting
+
 ## Running Claude Code in tmux
 
 ### Option 1: Create via Telegram (Recommended)
@@ -236,33 +276,72 @@ The window must be in the `ccbot` tmux session (configurable via `TMUX_SESSION_N
 
 ```
 src/ccbot/
-├── __init__.py            # Package entry point
-├── main.py                # CLI dispatcher (hook subcommand + bot bootstrap)
+├── main.py                # CLI dispatcher (--transport telegram|slack)
 ├── hook.py                # Hook subcommand for session tracking (+ --install)
 ├── config.py              # Configuration from environment variables
-├── bot.py                 # Telegram bot setup, command handlers, topic routing
-├── session.py             # Session management, state persistence, message history
-├── session_monitor.py     # JSONL file monitoring (polling + change detection)
-├── monitor_state.py       # Monitor state persistence (byte offsets)
-├── transcript_parser.py   # Claude Code JSONL transcript parsing
-├── terminal_parser.py     # Terminal pane parsing (interactive UI + status line)
-├── markdown_v2.py         # Markdown → Telegram MarkdownV2 conversion
-├── telegram_sender.py     # Message splitting + synchronous HTTP send
+├── session.py             # Session management, state persistence (shared)
+├── session_monitor.py     # JSONL file monitoring (shared)
+├── tmux_manager.py        # Tmux window management (shared)
+├── transcript_parser.py   # Claude Code JSONL transcript parsing (shared)
+├── terminal_parser.py     # Terminal pane parsing (shared)
 ├── screenshot.py          # Terminal text → PNG image with ANSI color support
-├── utils.py               # Shared utilities (atomic JSON writes, JSONL helpers)
-├── tmux_manager.py        # Tmux window management (list, create, send keys, kill)
-├── fonts/                 # Bundled fonts for screenshot rendering
-└── handlers/
-    ├── __init__.py        # Handler module exports
-    ├── callback_data.py   # Callback data constants (CB_* prefixes)
-    ├── directory_browser.py # Directory browser inline keyboard UI
-    ├── history.py         # Message history pagination
-    ├── interactive_ui.py  # Interactive UI handling (AskUser, ExitPlan, Permissions)
-    ├── message_queue.py   # Per-user message queue + worker (merge, rate limit)
-    ├── message_sender.py  # safe_reply / safe_edit / safe_send helpers
-    ├── response_builder.py # Response message building (format tool_use, thinking, etc.)
-    └── status_polling.py  # Terminal status line polling
+├── transcribe.py          # Voice-to-text transcription via OpenAI API
+├── transports/
+│   ├── telegram/
+│   │   ├── bot.py         # Telegram bot setup, topic routing
+│   │   └── handlers/      # Telegram-specific handlers
+│   └── slack/
+│       ├── bot.py         # Slack bot (Socket Mode + Assistants framework)
+│       ├── formatter.py   # Markdown → Slack mrkdwn conversion
+│       ├── splitter.py    # Message splitting for Slack's 3000 char limit
+│       └── handlers/      # Slack-specific handlers
+└── ...
 ```
+
+## Troubleshooting
+
+### WSL2 (Windows Subsystem for Linux)
+
+**Network connectivity issues (TimedOut on startup)**
+
+WSL2 uses a virtual network adapter that can be unstable. Enable mirrored networking mode for a more reliable connection:
+
+```ini
+# Add to %USERPROFILE%\.wslconfig on Windows, then run: wsl --shutdown
+[wsl2]
+networkingMode=mirrored
+```
+
+**IPv6 causing connection timeouts**
+
+If mirrored networking is not available or Telegram is unreachable via IPv6:
+
+```bash
+# Disable IPv6 for the current session
+sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1
+
+# Make it permanent (survives WSL restarts)
+echo "net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1" | sudo tee -a /etc/sysctl.conf
+```
+
+### Claude won't start ("cannot be launched inside another Claude Code session")
+
+If ccbot is running inside a Claude Code session (e.g. you launched it via a Claude Code terminal), set:
+
+```ini
+CLAUDE_COMMAND=env -u CLAUDECODE claude
+```
+
+### Sessions not being monitored (no messages delivered)
+
+Ensure the SessionStart hook is installed:
+
+```bash
+ccbot hook --install
+```
+
+Then restart any running Claude sessions so the hook fires and registers them.
 
 ## Contributors
 

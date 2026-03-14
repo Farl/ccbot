@@ -21,7 +21,7 @@ class TestConfigValid:
     def test_valid_config(self):
         cfg = Config()
         assert cfg.telegram_bot_token == "test:token"
-        assert cfg.allowed_users == {12345}
+        assert cfg.allowed_users == {"12345"}
 
     def test_custom_tmux_session_name(self, monkeypatch):
         monkeypatch.setenv("TMUX_SESSION_NAME", "mysession")
@@ -44,20 +44,29 @@ class TestConfigValid:
 
 @pytest.mark.usefixtures("_base_env")
 class TestConfigMissingEnv:
-    def test_missing_telegram_bot_token(self, monkeypatch):
+    def test_missing_telegram_bot_token_no_error(self, monkeypatch):
+        """Missing TELEGRAM_BOT_TOKEN is allowed — validated at transport startup."""
         monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-        with pytest.raises(ValueError, match="TELEGRAM_BOT_TOKEN"):
-            Config()
+        cfg = Config()
+        assert cfg.telegram_bot_token == ""
 
     def test_missing_allowed_users(self, monkeypatch):
         monkeypatch.delenv("ALLOWED_USERS", raising=False)
         with pytest.raises(ValueError, match="ALLOWED_USERS"):
             Config()
 
-    def test_non_numeric_allowed_users(self, monkeypatch):
-        monkeypatch.setenv("ALLOWED_USERS", "abc")
-        with pytest.raises(ValueError, match="non-numeric"):
-            Config()
+    def test_non_numeric_allowed_users_accepted(self, monkeypatch):
+        """Non-numeric ALLOWED_USERS are accepted (Slack uses string IDs)."""
+        monkeypatch.setenv("ALLOWED_USERS", "U0123ABC")
+        cfg = Config()
+        assert cfg.is_user_allowed("U0123ABC")
+
+    def test_mixed_numeric_and_string_allowed_users(self, monkeypatch):
+        """Both numeric and string user IDs are supported."""
+        monkeypatch.setenv("ALLOWED_USERS", "12345,U0123ABC")
+        cfg = Config()
+        assert cfg.is_user_allowed(12345)  # int lookup
+        assert cfg.is_user_allowed("U0123ABC")  # str lookup
 
 
 @pytest.mark.usefixtures("_base_env")
@@ -90,3 +99,56 @@ class TestConfigClaudeProjectsPath:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/lower/priority")
         cfg = Config()
         assert cfg.claude_projects_path == Path("/priority/path")
+
+
+@pytest.mark.usefixtures("_base_env")
+class TestConfigOpenAI:
+    def test_openai_defaults(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        cfg = Config()
+        assert cfg.openai_api_key == ""
+        assert cfg.openai_base_url == "https://api.openai.com/v1"
+
+    def test_openai_api_key(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+        cfg = Config()
+        assert cfg.openai_api_key == "sk-test-123"
+
+    def test_openai_base_url(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example.com/v1")
+        cfg = Config()
+        assert cfg.openai_base_url == "https://proxy.example.com/v1"
+
+    def test_openai_api_key_scrubbed_from_env(self, monkeypatch):
+        import os
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+        Config()
+        assert os.environ.get("OPENAI_API_KEY") is None
+
+
+@pytest.mark.usefixtures("_base_env")
+class TestConfigSlack:
+    def test_slack_defaults_empty(self, monkeypatch):
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+        cfg = Config()
+        assert cfg.slack_bot_token == ""
+        assert cfg.slack_app_token == ""
+
+    def test_slack_tokens_loaded(self, monkeypatch):
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
+        cfg = Config()
+        assert cfg.slack_bot_token == "xoxb-test"
+        assert cfg.slack_app_token == "xapp-test"
+
+    def test_slack_tokens_scrubbed_from_env(self, monkeypatch):
+        import os
+
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-secret")
+        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-secret")
+        Config()
+        assert os.environ.get("SLACK_BOT_TOKEN") is None
+        assert os.environ.get("SLACK_APP_TOKEN") is None

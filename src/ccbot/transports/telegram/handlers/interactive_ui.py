@@ -18,9 +18,9 @@ import logging
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-from ..session import session_manager
-from ..terminal_parser import extract_interactive_content, is_interactive_ui
-from ..tmux_manager import tmux_manager
+from ....session import session_manager
+from ....terminal_parser import extract_interactive_content, is_interactive_ui
+from ....tmux_manager import tmux_manager
 from .callback_data import (
     CB_ASK_DOWN,
     CB_ASK_ENTER,
@@ -153,7 +153,9 @@ async def handle_interactive_ui(
     False otherwise.
     """
     ikey = (user_id, thread_id or 0)
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    chat_id = session_manager.resolve_chat_id(
+        str(user_id), str(thread_id) if thread_id is not None else None
+    )
     w = await tmux_manager.find_window_by_id(window_id)
     if not w:
         return False
@@ -203,8 +205,12 @@ async def handle_interactive_ui(
             _interactive_mode[ikey] = window_id
             return True
         except Exception:
-            # Message unchanged or other error - silently ignore, don't send new
-            return True
+            # Edit failed (message deleted, etc.) - clear stale msg_id and send new
+            logger.debug(
+                "Edit failed for interactive msg %s, sending new", existing_msg_id
+            )
+            _interactive_msgs.pop(ikey, None)
+            # Fall through to send new message
 
     # Send new message (plain text — terminal content is not markdown)
     logger.info(
@@ -244,7 +250,9 @@ async def clear_interactive_msg(
         msg_id,
     )
     if bot and msg_id:
-        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+        chat_id = session_manager.resolve_chat_id(
+            str(user_id), str(thread_id) if thread_id is not None else None
+        )
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception:

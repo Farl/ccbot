@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ccbot.handlers.status_polling import update_status_message
+from ccbot.transports.telegram.handlers.status_polling import update_status_message
 
 
 @pytest.fixture
@@ -24,7 +24,10 @@ def mock_bot():
 @pytest.fixture
 def _clear_interactive_state():
     """Ensure interactive state is clean before and after each test."""
-    from ccbot.handlers.interactive_ui import _interactive_mode, _interactive_msgs
+    from ccbot.transports.telegram.handlers.interactive_ui import (
+        _interactive_mode,
+        _interactive_msgs,
+    )
 
     _interactive_mode.clear()
     _interactive_msgs.clear()
@@ -51,9 +54,11 @@ class TestStatusPollerSettingsDetection:
         mock_window.window_id = window_id
 
         with (
-            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
             patch(
-                "ccbot.handlers.status_polling.handle_interactive_ui",
+                "ccbot.transports.telegram.handlers.status_polling.tmux_manager"
+            ) as mock_tmux,
+            patch(
+                "ccbot.transports.telegram.handlers.status_polling.handle_interactive_ui",
                 new_callable=AsyncMock,
             ) as mock_handle_ui,
         ):
@@ -83,13 +88,15 @@ class TestStatusPollerSettingsDetection:
         )
 
         with (
-            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
             patch(
-                "ccbot.handlers.status_polling.handle_interactive_ui",
+                "ccbot.transports.telegram.handlers.status_polling.tmux_manager"
+            ) as mock_tmux,
+            patch(
+                "ccbot.transports.telegram.handlers.status_polling.handle_interactive_ui",
                 new_callable=AsyncMock,
             ) as mock_handle_ui,
             patch(
-                "ccbot.handlers.status_polling.enqueue_status_update",
+                "ccbot.transports.telegram.handlers.status_polling.enqueue_status_update",
                 new_callable=AsyncMock,
             ),
         ):
@@ -116,9 +123,15 @@ class TestStatusPollerSettingsDetection:
         mock_window.window_id = window_id
 
         with (
-            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux_poll,
-            patch("ccbot.handlers.interactive_ui.tmux_manager") as mock_tmux_ui,
-            patch("ccbot.handlers.interactive_ui.session_manager") as mock_sm,
+            patch(
+                "ccbot.transports.telegram.handlers.status_polling.tmux_manager"
+            ) as mock_tmux_poll,
+            patch(
+                "ccbot.transports.telegram.handlers.interactive_ui.tmux_manager"
+            ) as mock_tmux_ui,
+            patch(
+                "ccbot.transports.telegram.handlers.interactive_ui.session_manager"
+            ) as mock_sm,
         ):
             mock_tmux_poll.find_window_by_id = AsyncMock(return_value=mock_window)
             mock_tmux_poll.capture_pane = AsyncMock(return_value=sample_pane_settings)

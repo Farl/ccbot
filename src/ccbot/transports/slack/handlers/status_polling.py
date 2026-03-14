@@ -117,7 +117,7 @@ async def update_status_for_window(
         # Claude may have exited — clear any stale status message
         await clear_status(user_id, thread_ts, client, channel)
         return
-    if not config.show_status:
+    if not config.show_status or session_manager.is_silent(window_id):
         return
 
     skey = (user_id, thread_ts)

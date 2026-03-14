@@ -53,6 +53,7 @@ class WindowState:
     session_id: str = ""
     cwd: str = ""
     window_name: str = ""
+    silent: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -61,6 +62,8 @@ class WindowState:
         }
         if self.window_name:
             d["window_name"] = self.window_name
+        if self.silent:
+            d["silent"] = True
         return d
 
     @classmethod
@@ -69,6 +72,7 @@ class WindowState:
             session_id=data.get("session_id", ""),
             cwd=data.get("cwd", ""),
             window_name=data.get("window_name", ""),
+            silent=data.get("silent", False),
         )
 
 
@@ -397,6 +401,23 @@ class SessionManager:
         logger.info(
             "Cleaned up %d stale session_map entries (windows no longer in tmux)",
             len(stale_keys),
+        )
+
+    # --- Silent mode management ---
+
+    def is_silent(self, window_id: str) -> bool:
+        """Check if a window is in silent mode."""
+        if window_id not in self.window_states:
+            return False
+        return self.window_states[window_id].silent
+
+    def set_silent(self, window_id: str, silent: bool) -> None:
+        """Set silent mode for a window and persist."""
+        state = self.get_window_state(window_id)
+        state.silent = silent
+        self._save_state()
+        logger.info(
+            "Silent mode %s for window_id %s", "ON" if silent else "OFF", window_id
         )
 
     # --- Display name management ---

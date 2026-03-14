@@ -196,9 +196,7 @@ async def _dispatch_incoming(
     parsed = parse_text_command(text)
     if parsed:
         cmd, args = parsed
-        handled = await dispatch_command(
-            client, user_id, channel, thread_ts, cmd, args
-        )
+        handled = await dispatch_command(client, user_id, channel, thread_ts, cmd, args)
         if handled:
             return
 
@@ -276,14 +274,10 @@ def _register_handlers(slack_app: AsyncApp) -> None:
             return
         text: str = event.get("text", "")
         files: list[dict[str, Any]] = event.get("files", [])
-        await _dispatch_incoming(
-            user_id, channel, thread_ts, text, files, client, say
-        )
+        await _dispatch_incoming(user_id, channel, thread_ts, text, files, client, say)
 
     @slack_app.event({"type": "message", "subtype": "file_share"})
-    async def handle_file_share(
-        event: dict[str, Any], say: Any, client: Any
-    ) -> None:
+    async def handle_file_share(event: dict[str, Any], say: Any, client: Any) -> None:
         """Fallback for file_share events not caught by assistant handler."""
         user_id: str = event.get("user", "")
         channel: str = event.get("channel", "")
@@ -292,9 +286,7 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         files: list[dict[str, Any]] = event.get("files", [])
         if not files:
             return
-        await _dispatch_incoming(
-            user_id, channel, thread_ts, text, files, client, say
-        )
+        await _dispatch_incoming(user_id, channel, thread_ts, text, files, client, say)
 
     # --- Action handlers (work for both assistant and regular threads) ---
 
@@ -402,14 +394,20 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                     display_path = str(current_path).replace(str(Path.home()), "~")
                     try:
                         await client.assistant_threads_setTitle(
-                            channel_id=channel, thread_ts=effective_ts, title=display_path
+                            channel_id=channel,
+                            thread_ts=effective_ts,
+                            title=display_path,
                         )
                     except Exception:
                         logger.debug("Failed to set thread title", exc_info=True)
                     if pending_text:
                         await _dispatch_incoming(
-                            user_id, channel, effective_ts,
-                            pending_text, [], client,
+                            user_id,
+                            channel,
+                            effective_ts,
+                            pending_text,
+                            [],
+                            client,
                         )
                 else:
                     await client.chat_update(
@@ -475,8 +473,12 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                         logger.debug("Failed to set thread title", exc_info=True)
                     if pending_text:
                         await _dispatch_incoming(
-                            user_id, channel, thread_ts,
-                            pending_text, [], client,
+                            user_id,
+                            channel,
+                            thread_ts,
+                            pending_text,
+                            [],
+                            client,
                         )
                 else:
                     await client.chat_update(
@@ -505,8 +507,12 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                         logger.debug("Failed to set thread title", exc_info=True)
                     if pending_text:
                         await _dispatch_incoming(
-                            user_id, channel, thread_ts,
-                            pending_text, [], client,
+                            user_id,
+                            channel,
+                            thread_ts,
+                            pending_text,
+                            [],
+                            client,
                         )
                 else:
                     await client.chat_update(
@@ -671,6 +677,7 @@ def _register_handlers(slack_app: AsyncApp) -> None:
             edit_ts=message_ts,
         )
 
+
 _MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 
 
@@ -721,7 +728,9 @@ async def _handle_message_files(
 
     logger.info(
         "Processing %d file(s) from user=%s thread=%s",
-        len(files), user_id, thread_ts,
+        len(files),
+        user_id,
+        thread_ts,
     )
 
     window_id = session_manager.resolve_window_for_thread(user_id, thread_ts)

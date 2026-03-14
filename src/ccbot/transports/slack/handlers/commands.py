@@ -9,6 +9,7 @@ Supported commands:
   screenshot — Capture terminal as PNG and upload to Slack
   history    — Show paginated session history
   bind       — Open directory browser to bind a session (without forwarding text)
+  silent     — Toggle silent mode (suppress notifications) for the bound session
   help       — List all supported commands
 
 Import depth from this file (src/ccbot/transports/slack/handlers/):
@@ -83,6 +84,8 @@ async def dispatch_command(
         await _cmd_history(client, user_id, channel, thread_ts, page)
     elif cmd == "bind":
         await _cmd_bind(client, user_id, channel, thread_ts)
+    elif cmd == "silent":
+        await _cmd_silent(client, user_id, channel, thread_ts, args)
     elif cmd == "help":
         await _cmd_help(client, channel, thread_ts)
     else:
@@ -222,8 +225,11 @@ async def capture_and_upload(
 
     nav_blocks = build_nav_keyboard(window_id)
     nav_msg_ts = await send_message(
-        client, channel, "Terminal controls:",
-        thread_ts=thread_ts, blocks=nav_blocks,
+        client,
+        channel,
+        "Terminal controls:",
+        thread_ts=thread_ts,
+        blocks=nav_blocks,
     )
 
     # Track state for delete-on-refresh
@@ -234,7 +240,8 @@ async def capture_and_upload(
     }
     logger.debug(
         "Screenshot state: file_msg_ts=%s, nav_msg_ts=%s",
-        file_msg_ts, nav_msg_ts,
+        file_msg_ts,
+        nav_msg_ts,
     )
 
 
@@ -281,8 +288,11 @@ async def _cmd_screenshot(
 
     nav_blocks = build_nav_keyboard(window_id)
     nav_msg_ts = await send_message(
-        client, channel, "Terminal controls:",
-        thread_ts=thread_ts, blocks=nav_blocks,
+        client,
+        channel,
+        "Terminal controls:",
+        thread_ts=thread_ts,
+        blocks=nav_blocks,
     )
 
     _screenshot_states[skey] = {
@@ -321,7 +331,8 @@ async def _cmd_bind(
         window = await tmux_manager.find_window_by_id(window_id)
         if window:
             await send_message(
-                client, channel,
+                client,
+                channel,
                 "This thread already has a session bound.",
                 thread_ts=thread_ts,
             )
@@ -344,9 +355,34 @@ async def _cmd_bind(
         build_directory_browser(user_id, msg_ts=msg_ts, pending_text=None)
 
 
-async def _cmd_help(
-    client: AsyncWebClient, channel: str, thread_ts: str
+async def _cmd_silent(
+    client: AsyncWebClient,
+    user_id: str,
+    channel: str,
+    thread_ts: str,
+    args: list[str],
 ) -> None:
+    """Toggle silent mode for the bound session."""
+    window_id = _resolve_window(user_id, thread_ts)
+    if not window_id:
+        await send_message(
+            client, channel, "No active session in this thread.", thread_ts=thread_ts
+        )
+        return
+
+    if args and args[0].lower() in ("on", "off"):
+        new_silent = args[0].lower() == "on"
+    else:
+        new_silent = not session_manager.is_silent(window_id)
+
+    session_manager.set_silent(window_id, new_silent)
+    status = "ON" if new_silent else "OFF"
+    await send_message(
+        client, channel, f"🔇 Silent mode: {status}", thread_ts=thread_ts
+    )
+
+
+async def _cmd_help(client: AsyncWebClient, channel: str, thread_ts: str) -> None:
     """List all supported commands."""
     help_text = (
         "*Available commands:*\n"
@@ -354,6 +390,7 @@ async def _cmd_help(
         "• `!esc` — Send Escape key to interrupt Claude\n"
         "• `!screenshot` — Capture terminal as PNG\n"
         "• `!history [page]` — Show session message history\n"
+        "• `!silent [on|off]` — Toggle silent mode (suppress notifications)\n"
         "• `!unbind` — Kill session and unbind thread\n"
         "• `!help` — Show this help message"
     )

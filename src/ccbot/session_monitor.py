@@ -266,6 +266,10 @@ class SessionMonitor:
             logger.error("Error reading session file %s: %s", file_path, e)
         return new_entries
 
+    def _build_session_to_window_map(self) -> dict[str, str]:
+        """Build reverse map session_id -> window_id from _last_session_map."""
+        return {sid: wid for wid, sid in self._last_session_map.items()}
+
     async def check_for_updates(self, active_session_ids: set[str]) -> list[NewMessage]:
         """Check all sessions for new assistant messages.
 
@@ -276,6 +280,10 @@ class SessionMonitor:
             active_session_ids: Set of session IDs currently in session_map
         """
         new_messages = []
+        session_to_window = self._build_session_to_window_map()
+
+        # Deferred import to avoid circular dependency
+        from .session import session_manager as _sm
 
         # Scan projects to get available session files
         sessions = await self.scan_projects()
@@ -345,18 +353,26 @@ class SessionMonitor:
                 else:
                     self._pending_tools.pop(session_info.session_id, None)
 
+                # Silent mode: per-window override forces all filters off
+                wid = session_to_window.get(session_info.session_id)
+                silent = wid is not None and _sm.is_silent(wid)
+                show_user = not silent and config.show_user_messages
+                show_thinking = not silent and config.show_thinking
+                show_tool_use = not silent and config.show_tool_use
+                show_tool_result = not silent and config.show_tool_result
+
                 for entry in parsed_entries:
                     if not entry.text and not entry.image_data:
                         continue
                     # Notification filters
-                    if entry.role == "user" and not config.show_user_messages:
+                    if entry.role == "user" and not show_user:
                         continue
-                    if entry.content_type == "thinking" and not config.show_thinking:
+                    if entry.content_type == "thinking" and not show_thinking:
                         continue
-                    if entry.content_type == "tool_use" and not config.show_tool_use:
+                    if entry.content_type == "tool_use" and not show_tool_use:
                         continue
                     if entry.content_type == "tool_result" and (
-                        not config.show_tool_result or not config.show_tool_use
+                        not show_tool_result or not show_tool_use
                     ):
                         continue
                     new_messages.append(

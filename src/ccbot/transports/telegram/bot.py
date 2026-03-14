@@ -309,6 +309,32 @@ async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await safe_reply(update.message, "⎋ Sent Escape")
 
 
+async def silent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle silent mode for the bound session."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+
+    thread_id = _get_thread_id(update)
+    wid = session_manager.resolve_window_for_thread(str(user.id), _str_tid(thread_id))
+    if not wid:
+        await safe_reply(update.message, "❌ No session bound to this topic.")
+        return
+
+    # Parse optional on/off argument
+    args = context.args
+    if args and args[0].lower() in ("on", "off"):
+        new_silent = args[0].lower() == "on"
+    else:
+        new_silent = not session_manager.is_silent(wid)
+
+    session_manager.set_silent(wid, new_silent)
+    status = "ON" if new_silent else "OFF"
+    await safe_reply(update.message, f"🔇 Silent mode: {status}")
+
+
 async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fetch Claude Code usage stats from TUI and send to Telegram."""
     user = update.effective_user
@@ -1914,6 +1940,7 @@ def create_bot() -> Application:
     application.add_handler(CommandHandler("esc", esc_command))
     application.add_handler(CommandHandler("unbind", unbind_command))
     application.add_handler(CommandHandler("usage", usage_command))
+    application.add_handler(CommandHandler("silent", silent_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
     # Topic closed event — auto-kill associated window
     application.add_handler(

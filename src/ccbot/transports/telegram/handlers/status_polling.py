@@ -109,7 +109,7 @@ async def update_status_message(
 
     status_line = parse_status_line(pane_text)
 
-    if status_line and config.show_status:
+    if status_line and config.show_status and not session_manager.is_silent(window_id):
         await enqueue_status_update(
             bot,
             user_id,

@@ -1,21 +1,24 @@
-Restart the ccbot service. Arguments: `$ARGUMENTS` (optional: `telegram`, `slack`, or `all`; defaults to `telegram`).
+---
+name: restart-ccbot
+description: Restart the ccbot service. Arguments: `$ARGUMENTS` (optional: `telegram`, `slack`, or `all`; defaults to `slack`).
+---
 
-## Instructions
+# Restart ccbot
 
 Run the restart script via WSL. The script handles: stopping the running process, creating the tmux window if needed, and starting ccbot with the correct transport flag.
 
 **IMPORTANT:** Always run commands via WSL: `wsl -e bash -lc "..."`. The script must be run through `bash` directly (not `./scripts/restart.sh`) to avoid Windows line ending issues.
 
-### Steps
+## Steps
 
 1. Parse the transport argument from `$ARGUMENTS`:
-   - Empty or `telegram` → restart Telegram only
-   - `slack` → restart Slack only
+   - Empty or `slack` → restart Slack only
+   - `telegram` → restart Telegram only
    - `all` → restart both (Telegram first, then Slack)
 
 2. For each transport, run (convert CRLF first since Windows may save with `\r`):
    ```
-   wsl -e bash -lc "cd '/mnt/c/Users/sprin/文件/Prototyper/ccbot' && sed -i 's/\r$//' scripts/restart.sh && bash scripts/restart.sh <transport>"
+   wsl -e bash -lc "cd '$(wslpath -u "$(pwd)")' && sed -i 's/\r$//' scripts/restart.sh && bash scripts/restart.sh <transport>"
    ```
    Use a 30-second timeout.
 

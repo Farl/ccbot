@@ -53,6 +53,9 @@ logger = logging.getLogger(__name__)
 
 app: AsyncApp | None = None
 _dm_channels: dict[str, str] = {}
+# Track thread_ts currently being processed by the assistant handler to prevent
+# the regular message handler from double-processing the same message.
+_assistant_processing: set[str] = set()
 
 
 def _create_app() -> AsyncApp:
@@ -248,11 +251,13 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         )
 
         await set_status(status="processing...")
+        _assistant_processing.add(thread_ts)
         try:
             await _dispatch_incoming(
                 user_id, channel, thread_ts, text, files, client, say
             )
         finally:
+            _assistant_processing.discard(thread_ts)
             await set_status("")
 
     slack_app.assistant(assistant)
@@ -266,6 +271,9 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         user_id: str = event.get("user", "")
         channel: str = event.get("channel", "")
         thread_ts: str = event.get("thread_ts") or event.get("ts", "")
+        # Skip if assistant handler is already processing this thread
+        if thread_ts in _assistant_processing:
+            return
         text: str = event.get("text", "")
         files: list[dict[str, Any]] = event.get("files", [])
         await _dispatch_incoming(
@@ -399,13 +407,10 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                     except Exception:
                         logger.debug("Failed to set thread title", exc_info=True)
                     if pending_text:
-                        send_ok, send_msg = await session_manager.send_to_window(
-                            window_id, pending_text
+                        await _dispatch_incoming(
+                            user_id, channel, effective_ts,
+                            pending_text, [], client,
                         )
-                        if not send_ok:
-                            logger.warning(
-                                "Failed to forward pending text: %s", send_msg
-                            )
                 else:
                     await client.chat_update(
                         channel=channel,
@@ -469,11 +474,10 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                     except Exception:
                         logger.debug("Failed to set thread title", exc_info=True)
                     if pending_text:
-                        ok, err = await session_manager.send_to_window(
-                            window_id, pending_text
+                        await _dispatch_incoming(
+                            user_id, channel, thread_ts,
+                            pending_text, [], client,
                         )
-                        if not ok:
-                            logger.warning("Failed to forward pending text: %s", err)
                 else:
                     await client.chat_update(
                         channel=channel,
@@ -500,11 +504,10 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                     except Exception:
                         logger.debug("Failed to set thread title", exc_info=True)
                     if pending_text:
-                        ok, err = await session_manager.send_to_window(
-                            window_id, pending_text
+                        await _dispatch_incoming(
+                            user_id, channel, thread_ts,
+                            pending_text, [], client,
                         )
-                        if not ok:
-                            logger.warning("Failed to forward pending text: %s", err)
                 else:
                     await client.chat_update(
                         channel=channel,
@@ -557,15 +560,40 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                 window_id, tmux_key, enter=False, literal=False
             )
 
-        if key_name == "refresh":
-            user_id: str = body["user"]["id"]
-            channel_id: str = body["channel"]["id"]
-            thread_ts: str = body["message"].get("thread_ts", "")
+        user_id: str = body["user"]["id"]
+        channel_id: str = body["channel"]["id"]
+        msg_ts: str = body["message"].get("ts", "")
+        thread_ts: str = body["message"].get("thread_ts", "")
+
+        # Determine if this button came from an interactive UI message or
+        # a screenshot message, so we don't accidentally cross-trigger.
+        from .handlers.interactive_ui import _interactive_msgs
+        from .handlers.commands import _screenshot_states
+
+        ikey = (user_id, thread_ts)
+        is_interactive_btn = msg_ts == _interactive_msgs.get(ikey)
+        sstate = _screenshot_states.get(ikey)
+        is_screenshot_btn = sstate is not None and msg_ts == sstate.get("nav_msg_ts")
+
+        if key_name == "refresh" or tmux_key:
+            import asyncio
+
+            if tmux_key:
+                await asyncio.sleep(0.5)
             pane_text = await tmux_manager.capture_pane(window_id)
             if pane_text:
-                await handle_interactive_ui(
-                    client, user_id, thread_ts, window_id, channel_id, pane_text
-                )
+                if is_interactive_btn or not is_screenshot_btn:
+                    # Button came from interactive UI — only update interactive UI
+                    await handle_interactive_ui(
+                        client, user_id, thread_ts, window_id, channel_id, pane_text
+                    )
+                else:
+                    # Button came from screenshot — only refresh screenshot
+                    from .handlers.commands import capture_and_upload
+
+                    await capture_and_upload(
+                        client, user_id, channel_id, thread_ts, window_id
+                    )
 
     @slack_app.command("/esc")
     async def slash_esc(ack: Any, body: dict[str, Any], client: Any) -> None:

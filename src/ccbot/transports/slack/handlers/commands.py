@@ -14,14 +14,37 @@ Import depth from this file (src/ccbot/transports/slack/handlers/):
 """
 
 import logging
+from typing import Any
 
 from slack_sdk.web.async_client import AsyncWebClient
 
 from ....session import session_manager
 from ....tmux_manager import tmux_manager
-from .message_sender import send_message
+from .message_sender import delete_message, send_message
 
 logger = logging.getLogger(__name__)
+
+# Per-thread screenshot state: (user_id, thread_ts) -> {file_msg_ts, nav_msg_ts, window_id}
+_screenshot_states: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+async def clear_screenshot_state(
+    client: AsyncWebClient,
+    user_id: str,
+    channel: str,
+    thread_ts: str,
+) -> None:
+    """Delete screenshot + nav buttons from a thread if present."""
+    skey = (user_id, thread_ts)
+    state = _screenshot_states.pop(skey, None)
+    if not state:
+        return
+    file_ts = state.get("file_msg_ts")
+    nav_ts = state.get("nav_msg_ts")
+    if file_ts:
+        await delete_message(client, channel, file_ts)
+    if nav_ts:
+        await delete_message(client, channel, nav_ts)
 
 
 def parse_text_command(text: str) -> tuple[str, list[str]] | None:
@@ -96,10 +119,123 @@ async def _cmd_unbind(
     await send_message(client, channel, "Session unbound.", thread_ts=thread_ts)
 
 
+async def _upload_screenshot(
+    client: AsyncWebClient, channel: str, thread_ts: str, png_bytes: bytes
+) -> str | None:
+    """Upload a PNG screenshot to Slack.
+
+    Returns the file message ts (for later deletion) or None.
+    """
+    import httpx
+
+    upload_resp = await client.files_getUploadURLExternal(
+        filename="screenshot.png",
+        length=len(png_bytes),
+    )
+    upload_url: str = upload_resp["upload_url"]  # type: ignore[index]
+    file_id: str = upload_resp["file_id"]  # type: ignore[index]
+
+    async with httpx.AsyncClient() as http:
+        await http.post(
+            upload_url,
+            content=png_bytes,
+            headers={"Content-Type": "image/png"},
+        )
+
+    await client.files_completeUploadExternal(
+        files=[{"id": file_id, "title": "Terminal screenshot"}],
+        channel_id=channel,
+        thread_ts=thread_ts,
+    )
+
+    # Get the file message ts by scanning thread replies for the uploaded file
+    import asyncio
+
+    await asyncio.sleep(1.5)
+    try:
+        replies = await client.conversations_replies(
+            channel=channel, ts=thread_ts, limit=10, oldest=thread_ts
+        )
+        msgs = replies.get("messages", [])  # type: ignore[union-attr]
+        # Walk backwards to find the most recent message containing our file_id
+        for msg in reversed(msgs):
+            msg_files = msg.get("files", [])
+            for f in msg_files:
+                if f.get("id") == file_id:
+                    return msg.get("ts")  # type: ignore[no-any-return]
+    except Exception:
+        logger.debug("Could not retrieve file message ts", exc_info=True)
+    return None
+
+
+async def capture_and_upload(
+    client: AsyncWebClient,
+    user_id: str,
+    channel: str,
+    thread_ts: str,
+    window_id: str,
+) -> None:
+    """Capture terminal, delete old screenshot if any, upload new one + nav buttons.
+
+    Used by both _cmd_screenshot and the nav button refresh handler.
+    """
+    from ....screenshot import text_to_image
+
+    pane_text = await tmux_manager.capture_pane(window_id, with_ansi=True)
+    if not pane_text:
+        return
+
+    try:
+        png_bytes = await text_to_image(pane_text, with_ansi=True)
+    except Exception as e:
+        logger.debug("Screenshot render failed: %s", e)
+        return
+
+    skey = (user_id, thread_ts)
+    old_state = _screenshot_states.get(skey)
+
+    # Delete old screenshot file message and nav buttons message
+    if old_state:
+        old_file_ts = old_state.get("file_msg_ts")
+        old_nav_ts = old_state.get("nav_msg_ts")
+        if old_file_ts:
+            await delete_message(client, channel, old_file_ts)
+        if old_nav_ts:
+            await delete_message(client, channel, old_nav_ts)
+
+    # Upload new screenshot
+    try:
+        file_msg_ts = await _upload_screenshot(client, channel, thread_ts, png_bytes)
+    except Exception as e:
+        logger.debug("Screenshot upload failed: %s", e)
+        _screenshot_states.pop(skey, None)
+        return
+
+    # Send navigation keyboard
+    from .interactive_ui import build_nav_keyboard
+
+    nav_blocks = build_nav_keyboard(window_id)
+    nav_msg_ts = await send_message(
+        client, channel, "Terminal controls:",
+        thread_ts=thread_ts, blocks=nav_blocks,
+    )
+
+    # Track state for delete-on-refresh
+    _screenshot_states[skey] = {
+        "file_msg_ts": file_msg_ts,
+        "nav_msg_ts": nav_msg_ts,
+        "window_id": window_id,
+    }
+    logger.debug(
+        "Screenshot state: file_msg_ts=%s, nav_msg_ts=%s",
+        file_msg_ts, nav_msg_ts,
+    )
+
+
 async def _cmd_screenshot(
     client: AsyncWebClient, user_id: str, channel: str, thread_ts: str
 ) -> None:
-    """Capture terminal as PNG and upload to Slack."""
+    """Capture terminal as PNG and upload to Slack with navigation buttons."""
     window_id = _resolve_window(user_id, thread_ts)
     if not window_id:
         await send_message(
@@ -107,7 +243,7 @@ async def _cmd_screenshot(
         )
         return
 
-    pane_text = await tmux_manager.capture_pane(window_id)
+    pane_text = await tmux_manager.capture_pane(window_id, with_ansi=True)
     if not pane_text:
         await send_message(
             client, channel, "Failed to capture terminal.", thread_ts=thread_ts
@@ -115,9 +251,9 @@ async def _cmd_screenshot(
         return
 
     try:
-        from ....screenshot import text_to_image  # 4 dots = src/ccbot/
+        from ....screenshot import text_to_image
 
-        png_bytes = await text_to_image(pane_text)
+        png_bytes = await text_to_image(pane_text, with_ansi=True)
     except Exception as e:
         logger.error("Screenshot render failed: %s", e)
         await send_message(
@@ -125,31 +261,29 @@ async def _cmd_screenshot(
         )
         return
 
+    skey = (user_id, thread_ts)
+
     try:
-        import httpx
-
-        upload_resp = await client.files_getUploadURLExternal(
-            filename="screenshot.png",
-            length=len(png_bytes),
-        )
-        upload_url: str = upload_resp["upload_url"]  # type: ignore[index]
-        file_id: str = upload_resp["file_id"]  # type: ignore[index]
-
-        async with httpx.AsyncClient() as http:
-            await http.post(
-                upload_url,
-                content=png_bytes,
-                headers={"Content-Type": "image/png"},
-            )
-
-        await client.files_completeUploadExternal(
-            files=[{"id": file_id, "title": "Terminal screenshot"}],
-            channel_id=channel,
-            thread_ts=thread_ts,
-        )
+        file_msg_ts = await _upload_screenshot(client, channel, thread_ts, png_bytes)
     except Exception as e:
         logger.error("Screenshot upload failed: %s", e)
         await send_message(client, channel, f"Upload failed: {e}", thread_ts=thread_ts)
+        return
+
+    # Send navigation keyboard
+    from .interactive_ui import build_nav_keyboard
+
+    nav_blocks = build_nav_keyboard(window_id)
+    nav_msg_ts = await send_message(
+        client, channel, "Terminal controls:",
+        thread_ts=thread_ts, blocks=nav_blocks,
+    )
+
+    _screenshot_states[skey] = {
+        "file_msg_ts": file_msg_ts,
+        "nav_msg_ts": nav_msg_ts,
+        "window_id": window_id,
+    }
 
 
 async def _cmd_history(

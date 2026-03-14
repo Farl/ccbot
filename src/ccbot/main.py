@@ -26,8 +26,8 @@ def main() -> None:
     parser.add_argument(
         "--transport",
         choices=["telegram", "slack"],
-        default="telegram",
-        help="Messaging transport to use (default: telegram)",
+        default="slack",
+        help="Messaging transport to use (default: slack)",
     )
     args = parser.parse_args()
 

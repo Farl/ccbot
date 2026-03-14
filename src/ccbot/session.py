@@ -422,9 +422,34 @@ class SessionManager:
 
     # --- Display name management ---
 
+    # Icons prefixed to topic/thread names to indicate silent mode state.
+    SILENT_ICON = "🔇"
+    ACTIVE_ICON = "🔔"
+
     def get_display_name(self, window_id: str) -> str:
         """Get display name for a window_id, fallback to window_id itself."""
         return self.window_display_names.get(window_id, window_id)
+
+    def get_titled_name(self, window_id: str, name: str | None = None) -> str:
+        """Get display name with silent/active icon prefix.
+
+        Args:
+            window_id: The window to get the title for.
+            name: Optional override for the display name portion.
+        """
+        if name is None:
+            name = self.get_display_name(window_id)
+        icon = self.SILENT_ICON if self.is_silent(window_id) else self.ACTIVE_ICON
+        return f"{icon} {name}"
+
+    @staticmethod
+    def strip_silent_icon(name: str) -> str:
+        """Remove silent/active icon prefix from a name if present."""
+        for icon in (SessionManager.SILENT_ICON, SessionManager.ACTIVE_ICON):
+            prefix = f"{icon} "
+            if name.startswith(prefix):
+                return name[len(prefix) :]
+        return name
 
     def update_display_name(self, window_id: str, new_name: str) -> None:
         """Update the display name for a window and persist state."""

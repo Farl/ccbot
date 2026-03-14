@@ -86,6 +86,32 @@ def _is_claude_running(window: TmuxWindow) -> bool:
     return window.pane_current_command not in _IDLE_SHELLS
 
 
+async def _set_thread_title(
+    client: Any,
+    channel: str,
+    thread_ts: str,
+    window_id: str,
+    display_path: str | None = None,
+) -> None:
+    """Set Slack thread title with silent/active icon prefix.
+
+    Args:
+        display_path: Optional cwd-based path (e.g. '~/project'). If not
+            provided, derives from WindowState.cwd (falling back to display name).
+    """
+    try:
+        if display_path is None:
+            state = session_manager.get_window_state(window_id)
+            if state.cwd:
+                display_path = state.cwd.replace(str(Path.home()), "~")
+        titled = session_manager.get_titled_name(window_id, name=display_path)
+        await client.assistant_threads_setTitle(
+            channel_id=channel, thread_ts=thread_ts, title=titled
+        )
+    except Exception:
+        logger.debug("Failed to set thread title", exc_info=True)
+
+
 async def _restart_claude_in_window(window: TmuxWindow) -> None:
     """Restart Claude Code in an existing tmux window.
 
@@ -392,14 +418,9 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                         blocks=[],
                     )
                     display_path = str(current_path).replace(str(Path.home()), "~")
-                    try:
-                        await client.assistant_threads_setTitle(
-                            channel_id=channel,
-                            thread_ts=effective_ts,
-                            title=display_path,
-                        )
-                    except Exception:
-                        logger.debug("Failed to set thread title", exc_info=True)
+                    await _set_thread_title(
+                        client, channel, effective_ts, window_id, display_path
+                    )
                     if pending_text:
                         await _dispatch_incoming(
                             user_id,
@@ -465,12 +486,9 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                         blocks=[],
                     )
                     display_path = cwd.replace(str(Path.home()), "~")
-                    try:
-                        await client.assistant_threads_setTitle(
-                            channel_id=channel, thread_ts=thread_ts, title=display_path
-                        )
-                    except Exception:
-                        logger.debug("Failed to set thread title", exc_info=True)
+                    await _set_thread_title(
+                        client, channel, thread_ts, window_id, display_path
+                    )
                     if pending_text:
                         await _dispatch_incoming(
                             user_id,
@@ -499,12 +517,9 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                         blocks=[],
                     )
                     display_path = cwd.replace(str(Path.home()), "~")
-                    try:
-                        await client.assistant_threads_setTitle(
-                            channel_id=channel, thread_ts=thread_ts, title=display_path
-                        )
-                    except Exception:
-                        logger.debug("Failed to set thread title", exc_info=True)
+                    await _set_thread_title(
+                        client, channel, thread_ts, window_id, display_path
+                    )
                     if pending_text:
                         await _dispatch_incoming(
                             user_id,

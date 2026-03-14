@@ -181,6 +181,20 @@ def _str_tid(thread_id: int | None) -> str | None:
     return str(thread_id)
 
 
+async def _set_topic_title(
+    bot: "Bot", user_id: int, thread_id: int, window_id: str
+) -> None:
+    """Update a Telegram topic name with the silent/active icon prefix."""
+    resolved_chat = session_manager.resolve_chat_id(str(user_id), str(thread_id))
+    try:
+        titled = session_manager.get_titled_name(window_id)
+        await bot.edit_forum_topic(
+            chat_id=resolved_chat, message_thread_id=thread_id, name=titled
+        )
+    except Exception as e:
+        logger.debug(f"Failed to update topic name: {e}")
+
+
 # --- Command handlers ---
 
 
@@ -333,6 +347,10 @@ async def silent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     session_manager.set_silent(wid, new_silent)
     status = "ON" if new_silent else "OFF"
     await safe_reply(update.message, f"🔇 Silent mode: {status}")
+
+    # Update topic name with silent/active icon
+    if thread_id is not None:
+        await _set_topic_title(context.bot, user.id, thread_id, wid)
 
 
 async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -503,13 +521,15 @@ async def topic_edited_handler(
         )
         return
 
+    # Strip silent/active icon prefix before storing the clean name
+    clean_name = session_manager.strip_silent_icon(new_name)
     old_name = session_manager.get_display_name(wid)
-    await tmux_manager.rename_window(wid, new_name)
-    session_manager.update_display_name(wid, new_name)
+    await tmux_manager.rename_window(wid, clean_name)
+    session_manager.update_display_name(wid, clean_name)
     logger.info(
         "Topic renamed: '%s' -> '%s' (window=%s, user=%d, thread=%d)",
         old_name,
-        new_name,
+        clean_name,
         wid,
         user.id,
         thread_id,
@@ -1099,18 +1119,8 @@ async def _create_and_bind_window(
                 window_name=created_wname,
             )
 
-            # Rename the topic to match the window name
-            resolved_chat = session_manager.resolve_chat_id(
-                str(user.id), str(pending_thread_id)
-            )
-            try:
-                await context.bot.edit_forum_topic(
-                    chat_id=resolved_chat,
-                    message_thread_id=pending_thread_id,
-                    name=created_wname,
-                )
-            except Exception as e:
-                logger.debug(f"Failed to rename topic: {e}")
+            # Rename the topic to match the window name (with silent/active icon)
+            await _set_topic_title(context.bot, user.id, pending_thread_id, created_wid)
 
             status = "Resumed" if resume_session_id else "Created"
             await safe_edit(
@@ -1139,9 +1149,12 @@ async def _create_and_bind_window(
                 )
                 if not send_ok:
                     logger.warning("Failed to forward pending text: %s", send_msg)
+                    chat_id = session_manager.resolve_chat_id(
+                        str(user.id), str(pending_thread_id)
+                    )
                     await safe_send(
                         context.bot,
-                        resolved_chat,
+                        chat_id,
                         f"❌ Failed to send pending message: {send_msg}",
                         message_thread_id=pending_thread_id,
                     )
@@ -1499,18 +1512,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             str(user.id), str(thread_id), selected_wid, window_name=display
         )
 
-        # Rename the topic to match the window name
-        resolved_chat = session_manager.resolve_chat_id(
-            str(user.id), _str_tid(thread_id)
-        )
-        try:
-            await context.bot.edit_forum_topic(
-                chat_id=resolved_chat,
-                message_thread_id=thread_id,
-                name=display,
-            )
-        except Exception as e:
-            logger.debug(f"Failed to rename topic: {e}")
+        # Rename the topic to match the window name (with silent/active icon)
+        await _set_topic_title(context.bot, user.id, thread_id, selected_wid)
 
         await safe_edit(
             query,
@@ -1530,9 +1533,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             if not send_ok:
                 logger.warning("Failed to forward pending text: %s", send_msg)
+                chat_id = session_manager.resolve_chat_id(
+                    str(user.id), _str_tid(thread_id)
+                )
                 await safe_send(
                     context.bot,
-                    resolved_chat,
+                    chat_id,
                     f"❌ Failed to send pending message: {send_msg}",
                     message_thread_id=thread_id,
                 )

@@ -381,6 +381,11 @@ async def _cmd_silent(
         client, channel, f"🔇 Silent mode: {status}", thread_ts=thread_ts
     )
 
+    # Update thread title with silent/active icon
+    from ..bot import _set_thread_title
+
+    await _set_thread_title(client, channel, thread_ts, window_id)
+
 
 async def _cmd_help(client: AsyncWebClient, channel: str, thread_ts: str) -> None:
     """List all supported commands."""

@@ -8,6 +8,8 @@ Supported commands:
   unbind     — Kill window and unbind thread
   screenshot — Capture terminal as PNG and upload to Slack
   history    — Show paginated session history
+  bind       — Open directory browser to bind a session (without forwarding text)
+  help       — List all supported commands
 
 Import depth from this file (src/ccbot/transports/slack/handlers/):
   .... = 4 levels up = src/ccbot/
@@ -79,6 +81,10 @@ async def dispatch_command(
     elif cmd == "history":
         page = int(args[0]) - 1 if args and args[0].isdigit() else -1
         await _cmd_history(client, user_id, channel, thread_ts, page)
+    elif cmd == "bind":
+        await _cmd_bind(client, user_id, channel, thread_ts)
+    elif cmd == "help":
+        await _cmd_help(client, channel, thread_ts)
     else:
         return False
     return True
@@ -303,3 +309,52 @@ async def _cmd_history(
     from .history import send_history
 
     await send_history(client, user_id, channel, thread_ts, window_id, page=page)
+
+
+async def _cmd_bind(
+    client: AsyncWebClient, user_id: str, channel: str, thread_ts: str
+) -> None:
+    """Open directory browser to bind a session without forwarding any text."""
+    # If already bound, inform user
+    window_id = _resolve_window(user_id, thread_ts)
+    if window_id:
+        window = await tmux_manager.find_window_by_id(window_id)
+        if window:
+            await send_message(
+                client, channel,
+                "This thread already has a session bound.",
+                thread_ts=thread_ts,
+            )
+            return
+        # Window dead — unbind so we can rebind
+        session_manager.unbind_thread(user_id, thread_ts)
+
+    from .directory_browser import build_directory_browser
+
+    browser = build_directory_browser(user_id)
+    resp = await client.chat_postMessage(
+        channel=channel,
+        text=browser["text"],
+        blocks=browser["blocks"],
+        thread_ts=thread_ts,
+    )
+    msg_ts = resp.get("ts", "")
+    if msg_ts:
+        # No pending_text — session will be created without forwarding a message
+        build_directory_browser(user_id, msg_ts=msg_ts, pending_text=None)
+
+
+async def _cmd_help(
+    client: AsyncWebClient, channel: str, thread_ts: str
+) -> None:
+    """List all supported commands."""
+    help_text = (
+        "*Available commands:*\n"
+        "• `!bind` — Open directory browser to start a session\n"
+        "• `!esc` — Send Escape key to interrupt Claude\n"
+        "• `!screenshot` — Capture terminal as PNG\n"
+        "• `!history [page]` — Show session message history\n"
+        "• `!unbind` — Kill session and unbind thread\n"
+        "• `!help` — Show this help message"
+    )
+    await send_message(client, channel, help_text, thread_ts=thread_ts)

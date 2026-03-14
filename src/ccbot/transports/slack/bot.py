@@ -222,9 +222,8 @@ async def _dispatch_incoming(
     parsed = parse_text_command(text)
     if parsed:
         cmd, args = parsed
-        handled = await dispatch_command(client, user_id, channel, thread_ts, cmd, args)
-        if handled:
-            return
+        await dispatch_command(client, user_id, channel, thread_ts, cmd, args)
+        return
 
     await _handle_user_message(user_id, channel, thread_ts, text, client, say)
 
@@ -274,7 +273,6 @@ def _register_handlers(slack_app: AsyncApp) -> None:
             len(files),
         )
 
-        await set_status(status="processing...")
         _assistant_processing.add(thread_ts)
         try:
             await _dispatch_incoming(

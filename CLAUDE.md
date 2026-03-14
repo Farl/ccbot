@@ -37,6 +37,7 @@ Note: Telegram and Slack transports run as **separate processes**. To run both s
 
 ## Code Conventions
 
+- Never expose user privacy, secret, keys, ... etc.
 - Code as Document.
 - Never hardcode.
 - Every `.py` file starts with a module-level docstring: purpose clear within 10 lines, one-sentence summary first line, then core responsibilities and key components.

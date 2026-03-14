@@ -71,8 +71,8 @@ async def dispatch_command(
     thread_ts: str,
     cmd: str,
     args: list[str],
-) -> bool:
-    """Dispatch a command. Returns True if handled."""
+) -> None:
+    """Dispatch a command. Unknown commands get an error reply."""
     if cmd == "esc":
         await _cmd_esc(client, user_id, channel, thread_ts)
     elif cmd == "unbind":
@@ -89,8 +89,12 @@ async def dispatch_command(
     elif cmd == "help":
         await _cmd_help(client, channel, thread_ts)
     else:
-        return False
-    return True
+        await send_message(
+            client,
+            channel,
+            f"Unknown command: `!{cmd}`. Type `!help` for available commands.",
+            thread_ts=thread_ts,
+        )
 
 
 def _resolve_window(user_id: str, thread_ts: str) -> str | None:

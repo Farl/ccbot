@@ -9,7 +9,7 @@ from typing import Any
 
 from slack_sdk.web.async_client import AsyncWebClient
 
-from ..formatter import to_mrkdwn
+from ..formatter import to_blocks, to_mrkdwn
 from ..splitter import split_message
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,8 @@ async def send_message(
             kwargs["thread_ts"] = thread_ts
         if blocks:
             kwargs["blocks"] = blocks
+        elif (table_blocks := to_blocks(text)) is not None:
+            kwargs["blocks"] = table_blocks
         resp = await client.chat_postMessage(**kwargs)
         return resp.get("ts")
     except Exception as e:
@@ -57,6 +59,8 @@ async def edit_message(
         }
         if blocks:
             kwargs["blocks"] = blocks
+        elif (table_blocks := to_blocks(text)) is not None:
+            kwargs["blocks"] = table_blocks
         await client.chat_update(**kwargs)
         return True
     except Exception as e:

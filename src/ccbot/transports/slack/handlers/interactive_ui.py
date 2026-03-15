@@ -80,6 +80,12 @@ def build_nav_keyboard(window_id: str) -> list[dict[str, Any]]:
                 _btn("\u23ce Enter", "enter"),
             ],
         },
+        {
+            "type": "actions",
+            "elements": [
+                _btn("\u21e4 S-Tab", "stab"),
+            ],
+        },
     ]
 
 

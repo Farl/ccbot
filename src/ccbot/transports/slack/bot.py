@@ -571,6 +571,7 @@ def _register_handlers(slack_app: AsyncApp) -> None:
             "esc": "Escape",
             "space": "Space",
             "tab": "Tab",
+            "stab": "BTab",
         }
         tmux_key = key_map.get(key_name)
         if tmux_key:

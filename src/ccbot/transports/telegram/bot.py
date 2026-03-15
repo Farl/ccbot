@@ -66,6 +66,7 @@ from .handlers.callback_data import (
     CB_ASK_REFRESH,
     CB_ASK_RIGHT,
     CB_ASK_SPACE,
+    CB_ASK_STAB,
     CB_ASK_TAB,
     CB_ASK_UP,
     CB_DIR_CANCEL,
@@ -412,6 +413,7 @@ _KEYS_SEND_MAP: dict[str, tuple[str, bool, bool]] = {
     "ent": ("Enter", False, False),
     "spc": ("Space", False, False),
     "tab": ("Tab", False, False),
+    "stab": ("BTab", False, False),
     "cc": ("C-c", False, False),
 }
 
@@ -425,8 +427,30 @@ _KEY_LABELS: dict[str, str] = {
     "ent": "⏎ Enter",
     "spc": "␣ Space",
     "tab": "⇥ Tab",
+    "stab": "⇤ S-Tab",
     "cc": "^C",
 }
+
+# Interactive UI key dispatch: (callback prefix, tmux key, answer label)
+# Escape and Refresh are handled separately (different post-action behaviour).
+_ASK_KEY_MAP: list[tuple[str, str, str]] = [
+    (CB_ASK_UP, "Up", "↑"),
+    (CB_ASK_DOWN, "Down", "↓"),
+    (CB_ASK_LEFT, "Left", "←"),
+    (CB_ASK_RIGHT, "Right", "→"),
+    (CB_ASK_ENTER, "Enter", "⏎ Enter"),
+    (CB_ASK_SPACE, "Space", "␣ Space"),
+    (CB_ASK_TAB, "Tab", "⇥ Tab"),
+    (CB_ASK_STAB, "BTab", "⇤ S-Tab"),
+]
+
+
+def _match_ask_key(data: str) -> tuple[str, str, str] | None:
+    """Match callback data against interactive UI key prefixes."""
+    for prefix, tmux_key, label in _ASK_KEY_MAP:
+        if data.startswith(prefix):
+            return prefix, tmux_key, label
+    return None
 
 
 def _build_screenshot_keyboard(window_id: str) -> InlineKeyboardMarkup:
@@ -443,6 +467,7 @@ def _build_screenshot_keyboard(window_id: str) -> InlineKeyboardMarkup:
             [btn("␣ Space", "spc"), btn("↑", "up"), btn("⇥ Tab", "tab")],
             [btn("←", "lt"), btn("↓", "dn"), btn("→", "rt")],
             [btn("⎋ Esc", "esc"), btn("^C", "cc"), btn("⏎ Enter", "ent")],
+            [btn("⇤ S-Tab", "stab")],
             [
                 InlineKeyboardButton(
                     "🔄 Refresh",
@@ -1609,57 +1634,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif data == "noop":
         await query.answer()
 
-    # Interactive UI: Up arrow
-    elif data.startswith(CB_ASK_UP):
-        window_id = data[len(CB_ASK_UP) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(w.window_id, "Up", enter=False, literal=False)
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer()
-
-    # Interactive UI: Down arrow
-    elif data.startswith(CB_ASK_DOWN):
-        window_id = data[len(CB_ASK_DOWN) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Down", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer()
-
-    # Interactive UI: Left arrow
-    elif data.startswith(CB_ASK_LEFT):
-        window_id = data[len(CB_ASK_LEFT) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Left", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer()
-
-    # Interactive UI: Right arrow
-    elif data.startswith(CB_ASK_RIGHT):
-        window_id = data[len(CB_ASK_RIGHT) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Right", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer()
-
-    # Interactive UI: Escape
+    # Interactive UI: Escape (special — clears interactive mode)
     elif data.startswith(CB_ASK_ESC):
         window_id = data[len(CB_ASK_ESC) :]
         thread_id = _get_thread_id(update)
@@ -1671,49 +1646,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await clear_interactive_msg(user.id, context.bot, thread_id)
         await query.answer("⎋ Esc")
 
-    # Interactive UI: Enter
-    elif data.startswith(CB_ASK_ENTER):
-        window_id = data[len(CB_ASK_ENTER) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Enter", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer("⏎ Enter")
-
-    # Interactive UI: Space
-    elif data.startswith(CB_ASK_SPACE):
-        window_id = data[len(CB_ASK_SPACE) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Space", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer("␣ Space")
-
-    # Interactive UI: Tab
-    elif data.startswith(CB_ASK_TAB):
-        window_id = data[len(CB_ASK_TAB) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(w.window_id, "Tab", enter=False, literal=False)
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer("⇥ Tab")
-
-    # Interactive UI: refresh display
+    # Interactive UI: refresh display (no key sent)
     elif data.startswith(CB_ASK_REFRESH):
         window_id = data[len(CB_ASK_REFRESH) :]
         thread_id = _get_thread_id(update)
         await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
         await query.answer("🔄")
+
+    # Interactive UI: navigation keys (data-driven dispatch)
+    elif (ask_match := _match_ask_key(data)) is not None:
+        prefix, tmux_key, label = ask_match
+        window_id = data[len(prefix) :]
+        thread_id = _get_thread_id(update)
+        w = await tmux_manager.find_window_by_id(window_id)
+        if w:
+            await tmux_manager.send_keys(
+                w.window_id, tmux_key, enter=False, literal=False
+            )
+            await asyncio.sleep(0.5)
+            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        await query.answer(label)
 
     # Screenshot quick keys: send key to tmux window
     elif data.startswith(CB_KEYS_PREFIX):

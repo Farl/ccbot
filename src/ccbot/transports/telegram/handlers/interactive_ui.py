@@ -29,6 +29,7 @@ from .callback_data import (
     CB_ASK_REFRESH,
     CB_ASK_RIGHT,
     CB_ASK_SPACE,
+    CB_ASK_STAB,
     CB_ASK_TAB,
     CB_ASK_UP,
 )
@@ -134,6 +135,14 @@ def _build_interactive_keyboard(
             ),
             InlineKeyboardButton(
                 "⏎ Enter", callback_data=f"{CB_ASK_ENTER}{window_id}"[:64]
+            ),
+        ]
+    )
+    # Row 3: mode toggle
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "⇤ S-Tab", callback_data=f"{CB_ASK_STAB}{window_id}"[:64]
             ),
         ]
     )

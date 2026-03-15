@@ -63,6 +63,9 @@ def _create_app() -> AsyncApp:
     return AsyncApp(token=config.slack_bot_token)
 
 
+_dm_warned_users: set[str] = set()
+
+
 async def _resolve_dm_channel(user_id: str) -> str | None:
     """Open or retrieve a DM channel with a user."""
     if user_id in _dm_channels:
@@ -72,13 +75,33 @@ async def _resolve_dm_channel(user_id: str) -> str | None:
         resp = await app.client.conversations_open(users=[user_id])
         channel_id: str = resp["channel"]["id"]  # type: ignore[index]
         _dm_channels[user_id] = channel_id
+        _dm_warned_users.discard(user_id)
         return channel_id
     except Exception as e:
-        logger.error("Failed to open DM with %s: %s", user_id, e)
+        # Log warning once per user, then suppress to avoid spam
+        if user_id not in _dm_warned_users:
+            logger.warning("Failed to open DM with %s: %s", user_id, e)
+            _dm_warned_users.add(user_id)
         return None
 
 
 _IDLE_SHELLS: frozenset[str] = frozenset({"bash", "zsh", "sh", "fish", ""})
+
+
+async def _set_thread_status(channel: str, thread_ts: str, text: str) -> None:
+    """Set Slack Assistant thread status (native thinking indicator).
+
+    Wraps assistant_threads_setStatus with error handling for non-assistant
+    threads where the API call would fail.
+    """
+    if app is None:
+        return
+    try:
+        await app.client.assistant_threads_setStatus(
+            channel_id=channel, thread_ts=thread_ts, status=text
+        )
+    except Exception:
+        logger.debug("setStatus failed (non-assistant thread?)", exc_info=True)
 
 
 def _is_claude_running(window: TmuxWindow) -> bool:
@@ -196,6 +219,8 @@ async def _handle_user_message(
         if msg_ts:
             build_directory_browser(user_id, msg_ts=msg_ts, pending_text=text)
         logger.debug("Directory browser sent: ts=%s", msg_ts)
+        # Clear the "…" assistant status — no session to poll yet
+        await _set_thread_status(channel, thread_ts, "")
     except Exception as e:
         logger.error("Failed to send directory browser: %s", e)
 
@@ -273,14 +298,23 @@ def _register_handlers(slack_app: AsyncApp) -> None:
             len(files),
         )
 
+        # Cache channel so status polling can find it without conversations_open
+        _dm_channels[user_id] = channel
+
         _assistant_processing.add(thread_ts)
         try:
+            # Set status so the assistant framework knows we're handling it
+            # (prevents "No response requested." auto-reply).
+            # The status polling loop will update/clear this as Claude works.
+            await set_status("…")
             await _dispatch_incoming(
                 user_id, channel, thread_ts, text, files, client, say
             )
         finally:
             _assistant_processing.discard(thread_ts)
-            await set_status("")
+            # If no session was bound, polling won't clear status — do it here
+            if not session_manager.resolve_window_for_thread(user_id, thread_ts):
+                await _set_thread_status(channel, thread_ts, "")
 
     slack_app.assistant(assistant)
 
@@ -293,6 +327,8 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         user_id: str = event.get("user", "")
         channel: str = event.get("channel", "")
         thread_ts: str = event.get("thread_ts") or event.get("ts", "")
+        if user_id and channel:
+            _dm_channels.setdefault(user_id, channel)
         # Skip if assistant handler is already processing this thread
         if thread_ts in _assistant_processing:
             return
@@ -333,6 +369,7 @@ def _register_handlers(slack_app: AsyncApp) -> None:
             logger.warning("No browse state for user=%s msg_ts=%s", user_id, message_ts)
             return
         current_path = Path(state["path"])
+        carried_text = state.get("pending_text")
 
         try:
             if action_id.startswith(ACTION_DIR_SELECT):
@@ -341,7 +378,8 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                 if 0 <= idx < len(dirs):
                     new_path = current_path / dirs[idx]
                     browser = build_directory_browser(
-                        user_id, new_path, msg_ts=message_ts
+                        user_id, new_path, msg_ts=message_ts,
+                        pending_text=carried_text,
                     )
                     resp = await client.chat_update(
                         channel=channel,
@@ -352,7 +390,8 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                     logger.info("chat_update ok=%s for %s", resp.get("ok"), action_id)
             elif action_id == ACTION_DIR_UP:
                 browser = build_directory_browser(
-                    user_id, current_path.parent, msg_ts=message_ts
+                    user_id, current_path.parent, msg_ts=message_ts,
+                    pending_text=carried_text,
                 )
                 resp = await client.chat_update(
                     channel=channel,
@@ -364,7 +403,8 @@ def _register_handlers(slack_app: AsyncApp) -> None:
             elif action_id.startswith(ACTION_DIR_PAGE):
                 page = int(action_id[len(ACTION_DIR_PAGE) :])
                 browser = build_directory_browser(
-                    user_id, current_path, page, msg_ts=message_ts
+                    user_id, current_path, page, msg_ts=message_ts,
+                    pending_text=carried_text,
                 )
                 resp = await client.chat_update(
                     channel=channel,
@@ -453,6 +493,10 @@ def _register_handlers(slack_app: AsyncApp) -> None:
         user_id: str = body["user"]["id"]
         channel: str = body["channel"]["id"]
         message_ts: str = body["message"]["ts"]
+
+        logger.info(
+            "Sess action: %s (user=%s, msg_ts=%s)", action_id, user_id, message_ts
+        )
 
         state = get_session_picker_state(user_id, msg_ts=message_ts)
         if not state:
@@ -865,7 +909,9 @@ def run_slack_bot() -> None:
         monitor.set_message_callback(handle_new_message)
         monitor.start()
 
-        asyncio.create_task(start_status_polling(app.client, _resolve_dm_channel))
+        asyncio.create_task(
+            start_status_polling(app.client, _resolve_dm_channel, _set_thread_status)
+        )
 
         logger.info("Starting Slack bot in Socket Mode...")
         handler = AsyncSocketModeHandler(app, config.slack_app_token)

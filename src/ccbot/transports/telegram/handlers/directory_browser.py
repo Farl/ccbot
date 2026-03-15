@@ -22,6 +22,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from ....session import ClaudeSession
 
 from ....config import config
+from ....utils import is_dir_safe
 from .callback_data import (
     CB_DIR_CANCEL,
     CB_DIR_CONFIRM,
@@ -35,6 +36,7 @@ from .callback_data import (
     CB_WIN_CANCEL,
     CB_WIN_NEW,
 )
+
 
 # Directories per page in directory browser
 DIRS_PER_PAGE = 6
@@ -135,7 +137,7 @@ def build_directory_browser(
             [
                 d.name
                 for d in path.iterdir()
-                if d.is_dir()
+                if is_dir_safe(d)
                 and (config.show_hidden_dirs or not d.name.startswith("."))
             ]
         )

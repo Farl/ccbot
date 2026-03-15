@@ -38,7 +38,7 @@ Note: Telegram and Slack transports run as **separate processes**. To run both s
 ## Code Conventions
 
 - Never expose user privacy, secret, keys, ... etc.
-- Code as Document.
+- Code as Document. When a decision was shaped by a non-obvious lesson (bug, review feedback, edge case), leave a short comment explaining *why* — so the next person doesn't undo it.
 - Never hardcode.
 - Every `.py` file starts with a module-level docstring: purpose clear within 10 lines, one-sentence summary first line, then core responsibilities and key components.
 - Telegram interaction: prefer inline keyboards over reply keyboards; use `edit_message_text` for in-place updates; keep callback data under 64 bytes; use `answer_callback_query` for instant feedback.

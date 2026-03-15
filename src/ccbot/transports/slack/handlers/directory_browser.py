@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ....config import config
+from ....utils import is_dir_safe
 from ....session import ClaudeSession, session_manager
 from ....tmux_manager import tmux_manager
 
@@ -33,6 +34,7 @@ ACTION_DIR_PAGE = "dir_page_"
 ACTION_SESS_SELECT = "sess_select_"
 ACTION_SESS_NEW = "sess_new"
 ACTION_SESS_CANCEL = "sess_cancel"
+
 
 # Per-message browse state: msg_ts -> {path, dirs, page, user_id}
 _browse_states: dict[str, dict[str, Any]] = {}
@@ -184,7 +186,8 @@ def build_directory_browser(
         subdirs = sorted(
             d.name
             for d in path.iterdir()
-            if d.is_dir() and (config.show_hidden_dirs or not d.name.startswith("."))
+            if is_dir_safe(d)
+            and (config.show_hidden_dirs or not d.name.startswith("."))
         )
     except (PermissionError, OSError):
         subdirs = []

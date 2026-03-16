@@ -20,7 +20,7 @@ from pathlib import Path
 
 import libtmux
 
-from .config import config
+from .config import SENSITIVE_ENV_VARS, config
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,7 @@ class TmuxManager:
         """Get existing session or create a new one."""
         session = self.get_session()
         if session:
+            self._scrub_session_env(session)
             return session
 
         # Create new session with main window named specifically
@@ -75,7 +76,21 @@ class TmuxManager:
         # Rename the default window to the main window name
         if session.windows:
             session.windows[0].rename_window(config.tmux_main_window_name)
+        self._scrub_session_env(session)
         return session
+
+    @staticmethod
+    def _scrub_session_env(session: libtmux.Session) -> None:
+        """Remove sensitive env vars from the tmux session environment.
+
+        Prevents new windows (and their child processes like Claude Code)
+        from inheriting secrets such as TELEGRAM_BOT_TOKEN.
+        """
+        for var in SENSITIVE_ENV_VARS:
+            try:
+                session.unset_environment(var)
+            except Exception:
+                pass  # var not set in session env — nothing to remove
 
     async def list_windows(self) -> list[TmuxWindow]:
         """List all windows in the session with their working directories.
@@ -309,6 +324,26 @@ class TmuxManager:
 
         return await asyncio.to_thread(_sync_send_keys)
 
+    async def rename_window(self, window_id: str, new_name: str) -> bool:
+        """Rename a tmux window by its ID."""
+
+        def _sync_rename() -> bool:
+            session = self.get_session()
+            if not session:
+                return False
+            try:
+                window = session.windows.get(window_id=window_id)
+                if not window:
+                    return False
+                window.rename_window(new_name)
+                logger.info("Renamed window %s to '%s'", window_id, new_name)
+                return True
+            except Exception as e:
+                logger.error(f"Failed to rename window {window_id}: {e}")
+                return False
+
+        return await asyncio.to_thread(_sync_rename)
+
     async def kill_window(self, window_id: str) -> bool:
         """Kill a tmux window by its ID."""
 
@@ -334,6 +369,7 @@ class TmuxManager:
         work_dir: str,
         window_name: str | None = None,
         start_claude: bool = True,
+        resume_session_id: str | None = None,
     ) -> tuple[bool, str, str, str]:
         """Create a new tmux window and optionally start Claude Code.
 
@@ -341,6 +377,7 @@ class TmuxManager:
             work_dir: Working directory for the new window
             window_name: Optional window name (defaults to directory name)
             start_claude: Whether to start claude command
+            resume_session_id: If set, append --resume <id> to claude command
 
         Returns:
             Tuple of (success, message, window_name, window_id)
@@ -374,11 +411,19 @@ class TmuxManager:
 
                 wid = window.window_id or ""
 
+                # Prevent Claude Code from overriding window name
+                window.set_window_option("allow-rename", "off")
+
                 # Start Claude Code if requested
                 if start_claude:
                     pane = window.active_pane
                     if pane:
-                        pane.send_keys(config.claude_command, enter=True)
+                        # Clear CLAUDECODE env var to prevent nested session detection
+                        pane.send_keys("unset CLAUDECODE", enter=True)
+                        cmd = config.claude_command
+                        if resume_session_id:
+                            cmd = f"{cmd} --resume {resume_session_id}"
+                        pane.send_keys(cmd, enter=True)
 
                 logger.info(
                     "Created window '%s' (id=%s) at %s",

@@ -4,11 +4,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ccbot.handlers.interactive_ui import (
+from ccbot.transports.telegram.handlers.interactive_ui import (
     _build_interactive_keyboard,
     handle_interactive_ui,
 )
-from ccbot.handlers.callback_data import (
+from ccbot.transports.telegram.handlers.callback_data import (
     CB_ASK_DOWN,
     CB_ASK_ENTER,
     CB_ASK_ESC,
@@ -32,7 +32,10 @@ def mock_bot():
 @pytest.fixture
 def _clear_interactive_state():
     """Ensure interactive state is clean before and after each test."""
-    from ccbot.handlers.interactive_ui import _interactive_mode, _interactive_msgs
+    from ccbot.transports.telegram.handlers.interactive_ui import (
+        _interactive_mode,
+        _interactive_msgs,
+    )
 
     _interactive_mode.clear()
     _interactive_msgs.clear()
@@ -53,8 +56,12 @@ class TestHandleInteractiveUI:
         mock_window.window_id = window_id
 
         with (
-            patch("ccbot.handlers.interactive_ui.tmux_manager") as mock_tmux,
-            patch("ccbot.handlers.interactive_ui.session_manager") as mock_sm,
+            patch(
+                "ccbot.transports.telegram.handlers.interactive_ui.tmux_manager"
+            ) as mock_tmux,
+            patch(
+                "ccbot.transports.telegram.handlers.interactive_ui.session_manager"
+            ) as mock_sm,
         ):
             mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
             mock_tmux.capture_pane = AsyncMock(return_value=sample_pane_settings)
@@ -79,8 +86,10 @@ class TestHandleInteractiveUI:
         mock_window.window_id = window_id
 
         with (
-            patch("ccbot.handlers.interactive_ui.tmux_manager") as mock_tmux,
-            patch("ccbot.handlers.interactive_ui.session_manager"),
+            patch(
+                "ccbot.transports.telegram.handlers.interactive_ui.tmux_manager"
+            ) as mock_tmux,
+            patch("ccbot.transports.telegram.handlers.interactive_ui.session_manager"),
         ):
             mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
             mock_tmux.capture_pane = AsyncMock(return_value="$ echo hello\nhello\n$\n")

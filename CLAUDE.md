@@ -1,12 +1,14 @@
 # CLAUDE.md
 
-ccmux — Telegram bot that bridges Telegram Forum topics to Claude Code sessions via tmux windows. Each topic is bound to one tmux window running one Claude Code instance.
+ccmux — Bot that bridges Telegram/Slack to Claude Code sessions via tmux windows. Each thread/topic is bound to one tmux window running one Claude Code instance.
 
-Tech stack: Python, python-telegram-bot, tmux, uv.
+Tech stack: Python, python-telegram-bot, slack-bolt, tmux, uv.
 
 ## Common Commands
 
 ```bash
+uv run ccbot                          # Start Telegram transport (default)
+uv run ccbot --transport slack        # Start Slack transport
 uv run ruff check src/ tests/         # Lint — MUST pass before committing
 uv run ruff format src/ tests/        # Format — auto-fix, then verify with --check
 uv run pyright src/ccbot/             # Type check — MUST be 0 errors before committing
@@ -14,18 +16,30 @@ uv run pyright src/ccbot/             # Type check — MUST be 0 errors before c
 ccbot hook --install                  # Auto-install Claude Code SessionStart hook
 ```
 
+Note: Telegram and Slack transports run as **separate processes**. To run both simultaneously, start each in its own tmux window.
+
 ## Core Design Constraints
 
-- **1 Topic = 1 Window = 1 Session** — all internal routing keyed by tmux window ID (`@0`, `@12`), not window name. Window names kept as display names. Same directory can have multiple windows.
-- **Topic-only** — no backward-compat for non-topic mode. No `active_sessions`, no `/list`, no General topic routing.
-- **No message truncation** at parse layer — splitting only at send layer (`split_message`, 4096 char limit).
-- **MarkdownV2 only** — use `safe_reply`/`safe_edit`/`safe_send` helpers (auto fallback to plain text). Internal queue/UI code calls bot API directly with its own fallback.
+- **1 Thread = 1 Window = 1 Session** — all internal routing keyed by tmux window ID (`@0`, `@12`), not window name. Window names kept as display names. Same directory can have multiple windows.
+- **Shared session layer** — `SessionManager` stores both Telegram (numeric user IDs) and Slack (string user IDs like `U...`) bindings in the same `state.json`. Transport-specific code must guard against the other transport's ID format (e.g. Telegram's `int()` calls skip non-numeric IDs).
+- **No message truncation** at parse layer — splitting only at send layer (4096 char for Telegram, 3000 char for Slack).
 - **Hook-based session tracking** — `SessionStart` hook writes `session_map.json`; monitor polls it to detect session changes.
 - **Message queue per user** — FIFO ordering, message merging (3800 char limit), tool_use/tool_result pairing.
+
+### Telegram-specific
+- **MarkdownV2 only** — use `safe_reply`/`safe_edit`/`safe_send` helpers (auto fallback to plain text).
 - **Rate limiting** — `AIORateLimiter(max_retries=5)` on the Application (30/s global). On restart, the global bucket is pre-filled to avoid burst against Telegram's server-side counter.
+- **Topic-only** — no backward-compat for non-topic mode.
+
+### Slack-specific
+- **Assistants framework** — `assistant.user_message` intercepts messages in assistant threads before `@slack_app.event("message")`. Both handlers must implement the same features (files, text commands).
+- **Block Kit** — interactive UI uses Slack Block Kit (buttons, sections, actions).
 
 ## Code Conventions
 
+- Never expose user privacy, secret, keys, ... etc.
+- Code as Document. When a decision was shaped by a non-obvious lesson (bug, review feedback, edge case), leave a short comment explaining *why* — so the next person doesn't undo it.
+- Never hardcode.
 - Every `.py` file starts with a module-level docstring: purpose clear within 10 lines, one-sentence summary first line, then core responsibilities and key components.
 - Telegram interaction: prefer inline keyboards over reply keyboards; use `edit_message_text` for in-place updates; keep callback data under 64 bytes; use `answer_callback_query` for instant feedback.
 

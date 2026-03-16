@@ -76,6 +76,24 @@ UI_PATTERNS: list[UIPattern] = [
         top=(
             re.compile(r"^\s*Do you want to proceed\?"),
             re.compile(r"^\s*Do you want to make this edit"),
+            re.compile(r"^\s*Do you want to create \S"),
+            re.compile(r"^\s*Do you want to delete \S"),
+        ),
+        bottom=(re.compile(r"^\s*Esc to cancel"),),
+    ),
+    UIPattern(
+        # Permission menu with numbered choices (no "Esc to cancel" line)
+        name="PermissionPrompt",
+        top=(re.compile(r"^\s*❯\s*1\.\s*Yes"),),
+        bottom=(),
+        min_gap=2,
+    ),
+    UIPattern(
+        # Bash command approval
+        name="BashApproval",
+        top=(
+            re.compile(r"^\s*Bash command\s*$"),
+            re.compile(r"^\s*This command requires approval"),
         ),
         bottom=(re.compile(r"^\s*Esc to cancel"),),
     ),
@@ -83,6 +101,14 @@ UI_PATTERNS: list[UIPattern] = [
         name="RestoreCheckpoint",
         top=(re.compile(r"^\s*Restore the code"),),
         bottom=(re.compile(r"^\s*Enter to continue"),),
+    ),
+    UIPattern(
+        name="ResumeSession",
+        top=(re.compile(r"^\s*Resume Session"),),
+        bottom=(
+            re.compile(r"Esc to cancel"),
+            re.compile(r"Type to search"),
+        ),
     ),
     UIPattern(
         name="Settings",

@@ -28,13 +28,24 @@ from telegram.constants import ChatAction
 from telegram.error import RetryAfter
 
 from ..markdown_v2 import convert_markdown
-from ..session import session_manager
-from ..transcript_parser import TranscriptParser
-from ..terminal_parser import parse_status_line
-from ..tmux_manager import tmux_manager
-from .message_sender import NO_LINK_PREVIEW, send_photo, send_with_fallback
+from ....session import session_manager
+from ....terminal_parser import parse_status_line
+from ....tmux_manager import tmux_manager
+from .message_sender import (
+    NO_LINK_PREVIEW,
+    PARSE_MODE,
+    send_photo,
+    send_with_fallback,
+    strip_sentinels,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_formatted(text: str) -> str:
+    """Convert markdown to MarkdownV2."""
+    return convert_markdown(text)
+
 
 # Merge limit for content messages
 MERGE_MAX_LENGTH = 3800  # Leave room for markdown conversion overhead
@@ -290,7 +301,9 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
     """Process a content message task."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
-    chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+    chat_id = session_manager.resolve_chat_id(
+        str(user_id), str(task.thread_id) if task.thread_id is not None else None
+    )
 
     # 1. Handle tool_result editing (merged parts are edited together)
     if task.content_type == "tool_result" and task.tool_use_id:
@@ -305,8 +318,8 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=edit_msg_id,
-                    text=convert_markdown(full_text),
-                    parse_mode="MarkdownV2",
+                    text=_ensure_formatted(full_text),
+                    parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
                 await _send_task_images(bot, chat_id, task)
@@ -317,11 +330,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             except Exception:
                 try:
                     # Fallback: plain text with sentinels stripped
-                    plain_text = (
-                        (task.text or full_text)
-                        .replace(TranscriptParser.EXPANDABLE_QUOTE_START, "")
-                        .replace(TranscriptParser.EXPANDABLE_QUOTE_END, "")
-                    )
+                    plain_text = strip_sentinels(task.text or full_text)
                     await bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=edit_msg_id,
@@ -395,7 +404,9 @@ async def _convert_status_to_content(
         return None
 
     msg_id, stored_wid, _ = info
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+    chat_id = session_manager.resolve_chat_id(
+        str(user_id), str(thread_id_or_0) if thread_id_or_0 else None
+    )
     if stored_wid != window_id:
         # Different window, just delete the old status
         try:
@@ -409,8 +420,8 @@ async def _convert_status_to_content(
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=msg_id,
-            text=convert_markdown(content_text),
-            parse_mode="MarkdownV2",
+            text=_ensure_formatted(content_text),
+            parse_mode=PARSE_MODE,
             link_preview_options=NO_LINK_PREVIEW,
         )
         return msg_id
@@ -419,9 +430,7 @@ async def _convert_status_to_content(
     except Exception:
         try:
             # Fallback to plain text with sentinels stripped
-            plain = content_text.replace(
-                TranscriptParser.EXPANDABLE_QUOTE_START, ""
-            ).replace(TranscriptParser.EXPANDABLE_QUOTE_END, "")
+            plain = strip_sentinels(content_text)
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=msg_id,
@@ -443,7 +452,9 @@ async def _process_status_update_task(
     """Process a status update task."""
     wid = task.window_id or ""
     tid = task.thread_id or 0
-    chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+    chat_id = session_manager.resolve_chat_id(
+        str(user_id), str(task.thread_id) if task.thread_id is not None else None
+    )
     skey = (user_id, tid)
     status_text = task.text or ""
 
@@ -480,8 +491,8 @@ async def _process_status_update_task(
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=msg_id,
-                    text=convert_markdown(status_text),
-                    parse_mode="MarkdownV2",
+                    text=_ensure_formatted(status_text),
+                    parse_mode=PARSE_MODE,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
                 _status_msg_info[skey] = (msg_id, wid, status_text)
@@ -517,7 +528,9 @@ async def _do_send_status_message(
     """Send a new status message and track it (internal, called from worker)."""
     skey = (user_id, thread_id_or_0)
     thread_id: int | None = thread_id_or_0 if thread_id_or_0 != 0 else None
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    chat_id = session_manager.resolve_chat_id(
+        str(user_id), str(thread_id) if thread_id is not None else None
+    )
     # Safety net: delete any orphaned status message before sending a new one.
     # This catches edge cases where tracking was cleared without deleting the message.
     old = _status_msg_info.pop(skey, None)
@@ -554,7 +567,9 @@ async def _do_clear_status_message(
     info = _status_msg_info.pop(skey, None)
     if info:
         msg_id = info[0]
-        chat_id = session_manager.resolve_chat_id(user_id, thread_id_or_0 or None)
+        chat_id = session_manager.resolve_chat_id(
+            str(user_id), str(thread_id_or_0) if thread_id_or_0 else None
+        )
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception as e:

@@ -39,8 +39,23 @@ fi
 # Get the pane PID and check if ccbot is running
 PANE_PID=$(tmux list-panes -t "$TARGET" -F '#{pane_pid}')
 
+find_descendants() {
+    # Portable recursive child-PID finder (works on macOS and Linux).
+    # pstree -a is Linux-only and silently fails on macOS.
+    local parent=$1
+    local children
+    children=$(pgrep -P "$parent" 2>/dev/null) || true
+    for child in $children; do
+        echo "$child"
+        find_descendants "$child"
+    done
+}
+
 is_ccbot_running() {
-    pstree -a "$PANE_PID" 2>/dev/null | grep -q 'uv.*run ccbot\|ccbot.*\.venv/bin/ccbot'
+    local descendants
+    descendants=$(find_descendants "$PANE_PID")
+    [ -n "$descendants" ] && echo "$descendants" | xargs ps -o command= -p 2>/dev/null \
+        | grep -q 'uv.*run ccbot\|\.venv/bin/ccbot'
 }
 
 # Stop existing process if running
@@ -58,7 +73,8 @@ if is_ccbot_running; then
 
     if is_ccbot_running; then
         echo "Process did not exit after ${MAX_WAIT}s, sending SIGTERM..."
-        UV_PID=$(pstree -ap "$PANE_PID" 2>/dev/null | grep -oP 'uv,\K\d+' | head -1)
+        UV_PID=$(find_descendants "$PANE_PID" | xargs ps -o pid=,command= -p 2>/dev/null \
+            | grep 'uv.*run ccbot' | awk '{print $1}' | head -1)
         if [ -n "$UV_PID" ]; then
             kill "$UV_PID" 2>/dev/null || true
             sleep 2

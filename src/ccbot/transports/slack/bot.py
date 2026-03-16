@@ -244,6 +244,13 @@ async def _dispatch_incoming(
         )
         return
 
+    # !/... forwards a slash command directly to Claude Code, bypassing bot commands.
+    # Slack blocks unregistered slash commands, so !/clear sends /clear to Claude Code.
+    if text.strip().startswith("!/"):
+        raw = text.strip()[1:]  # strip leading "!", keep "/clear" etc.
+        await _handle_user_message(user_id, channel, thread_ts, raw, client, say)
+        return
+
     parsed = parse_text_command(text)
     if parsed:
         cmd, args = parsed
@@ -378,7 +385,9 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                 if 0 <= idx < len(dirs):
                     new_path = current_path / dirs[idx]
                     browser = build_directory_browser(
-                        user_id, new_path, msg_ts=message_ts,
+                        user_id,
+                        new_path,
+                        msg_ts=message_ts,
                         pending_text=carried_text,
                     )
                     resp = await client.chat_update(
@@ -390,7 +399,9 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                     logger.info("chat_update ok=%s for %s", resp.get("ok"), action_id)
             elif action_id == ACTION_DIR_UP:
                 browser = build_directory_browser(
-                    user_id, current_path.parent, msg_ts=message_ts,
+                    user_id,
+                    current_path.parent,
+                    msg_ts=message_ts,
                     pending_text=carried_text,
                 )
                 resp = await client.chat_update(
@@ -403,7 +414,10 @@ def _register_handlers(slack_app: AsyncApp) -> None:
             elif action_id.startswith(ACTION_DIR_PAGE):
                 page = int(action_id[len(ACTION_DIR_PAGE) :])
                 browser = build_directory_browser(
-                    user_id, current_path, page, msg_ts=message_ts,
+                    user_id,
+                    current_path,
+                    page,
+                    msg_ts=message_ts,
                     pending_text=carried_text,
                 )
                 resp = await client.chat_update(

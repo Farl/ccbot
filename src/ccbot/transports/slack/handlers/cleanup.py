@@ -33,7 +33,7 @@ async def cleanup_thread(
     if not window_id:
         return
     await clear_interactive_msg(client, user_id, thread_ts, channel)
-    await clear_status(user_id, thread_ts, client, channel)
+    await clear_status(user_id, thread_ts, channel)
     clear_tool_msg_ids(user_id, thread_ts)
     if kill_window:
         await tmux_manager.kill_window(window_id)

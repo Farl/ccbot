@@ -128,11 +128,14 @@ def sample_pane_permission():
     return "  Do you want to proceed?\n  Some permission details\n  Esc to cancel\n"
 
 
+# Realistic bottom chrome of an *actively running* Claude pane: the footer
+# carries the "esc to interrupt" marker that parse_status_line uses to tell a
+# live turn from an idle prompt.
 _CHROME = (
     "──────────────────────────────────────\n"
     "❯ \n"
     "──────────────────────────────────────\n"
-    "  [Opus 4.6] Context: 50%\n"
+    "  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents\n"
 )
 
 

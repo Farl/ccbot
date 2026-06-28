@@ -62,6 +62,52 @@ class TestParseStatusLine:
     def test_uses_fixture(self, sample_pane_status_line: str):
         assert parse_status_line(sample_pane_status_line) == "Reading file src/main.py"
 
+    def test_spinner_above_btw_tip(self, chrome: str):
+        """A /btw Tip overlay between the spinner and chrome must not hide it."""
+        pane = (
+            "some earlier output\n"
+            "✢ Ideating… (1m 20s · ↑ 3.8k tokens)\n"
+            "  ⎿  Tip: Use /btw to ask a quick side question without interrupting\n"
+            "     current work\n"
+            f"{chrome}"
+        )
+        assert parse_status_line(pane) == "Ideating… (1m 20s · ↑ 3.8k tokens)"
+
+    def test_spinner_above_rating_prompt(self, chrome: str):
+        """Real pane: spinner is pushed up by a Tip AND the session rating prompt."""
+        pane = (
+            "     echo ; echo '=== listener ==='\n"
+            "\n"
+            "✢ Ideating… (1m 20s · ↑ 3.8k tokens)\n"
+            "  ⎿  Tip: Use /btw to ask a quick side question without interrupting\n"
+            "     current work\n"
+            "\n"
+            "● How is Claude doing this session? (optional)\n"
+            "  1: Bad    2: Fine   3: Good   0: Dismiss\n"
+            "\n"
+            f"{chrome}"
+        )
+        assert parse_status_line(pane) == "Ideating… (1m 20s · ↑ 3.8k tokens)"
+
+    def test_completed_summary_not_active(self):
+        """A finished turn leaves "✻ Brewed for …" with no "esc to interrupt"
+        in the footer — it must NOT be reported as a live status (regression:
+        a session showed a stale "Brewed for 30m 55s" indicator for 30 min)."""
+        pane = (
+            "  你這幾條糾正都落到文件了。\n"
+            "\n"
+            "✻ Brewed for 30m 55s\n"
+            "\n"
+            "● How is Claude doing this session? (optional)\n"
+            "  1: Bad    2: Fine   3: Good   0: Dismiss\n"
+            "\n"
+            "────────────────────────────────────────\n"
+            "❯ 測一次 issue 助理\n"
+            "────────────────────────────────────────\n"
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents     /rc active\n"
+        )
+        assert parse_status_line(pane) is None
+
 
 # ── extract_interactive_content ──────────────────────────────────────────
 

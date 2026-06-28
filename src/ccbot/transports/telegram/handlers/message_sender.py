@@ -24,7 +24,7 @@ from telegram import Bot, InputMediaPhoto, LinkPreviewOptions, Message
 from telegram.error import RetryAfter
 
 from ..markdown_v2 import convert_markdown
-from ..transcript_parser import TranscriptParser
+from ....transcript_parser import TranscriptParser
 
 logger = logging.getLogger(__name__)
 

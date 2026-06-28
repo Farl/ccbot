@@ -2,7 +2,7 @@
 
 import pytest
 
-from ccbot.telegram_sender import split_message
+from ccbot.transports.telegram.telegram_sender import split_message
 
 
 class TestSplitMessage:

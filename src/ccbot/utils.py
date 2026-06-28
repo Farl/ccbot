@@ -4,6 +4,7 @@ Provides:
   - ccbot_dir(): resolve config directory from CCBOT_DIR env var.
   - atomic_write_json(): crash-safe JSON file writes via temp+rename.
   - read_cwd_from_jsonl(): extract the cwd field from the first JSONL entry.
+  - is_dir_safe(): check if path is a directory, suppressing permission errors.
 """
 
 import json
@@ -47,6 +48,14 @@ def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
         except OSError:
             pass
         raise
+
+
+def is_dir_safe(entry: Path) -> bool:
+    """Check if path is a directory, returning False on permission errors."""
+    try:
+        return entry.is_dir()
+    except (PermissionError, OSError):
+        return False
 
 
 def read_cwd_from_jsonl(file_path: str | Path) -> str:

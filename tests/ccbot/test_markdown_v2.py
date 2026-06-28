@@ -2,7 +2,7 @@
 
 import pytest
 
-from ccbot.markdown_v2 import _escape_mdv2, convert_markdown
+from ccbot.transports.telegram.markdown_v2 import _escape_mdv2, convert_markdown
 from ccbot.transcript_parser import TranscriptParser
 
 EXP_START = TranscriptParser.EXPANDABLE_QUOTE_START

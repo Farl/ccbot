@@ -57,7 +57,7 @@ from telegram.ext import (
     filters,
 )
 
-from .config import config
+from ...config import config
 from .handlers.callback_data import (
     CB_ASK_DOWN,
     CB_ASK_ENTER,
@@ -66,6 +66,7 @@ from .handlers.callback_data import (
     CB_ASK_REFRESH,
     CB_ASK_RIGHT,
     CB_ASK_SPACE,
+    CB_ASK_STAB,
     CB_ASK_TAB,
     CB_ASK_UP,
     CB_DIR_CANCEL,
@@ -129,14 +130,14 @@ from .handlers.message_sender import (
 from .markdown_v2 import convert_markdown
 from .handlers.response_builder import build_response_parts
 from .handlers.status_polling import status_poll_loop
-from .screenshot import text_to_image
-from .session import session_manager
-from .session_monitor import NewMessage, SessionMonitor
-from .terminal_parser import extract_bash_output, is_interactive_ui
-from .tmux_manager import tmux_manager
-from .transcribe import close_client as close_transcribe_client
-from .transcribe import transcribe_voice
-from .utils import ccbot_dir
+from ...screenshot import text_to_image
+from ...session import session_manager
+from ...session_monitor import NewMessage, SessionMonitor
+from ...terminal_parser import extract_bash_output, is_interactive_ui
+from ...tmux_manager import tmux_manager
+from ...transcribe import close_client as close_transcribe_client
+from ...transcribe import transcribe_voice
+from ...utils import ccbot_dir
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,27 @@ def _get_thread_id(update: Update) -> int | None:
     return tid
 
 
+def _str_tid(thread_id: int | None) -> str | None:
+    """Convert int thread_id to str for session_manager calls, preserving None."""
+    if thread_id is None:
+        return None
+    return str(thread_id)
+
+
+async def _set_topic_title(
+    bot: "Bot", user_id: int, thread_id: int, window_id: str
+) -> None:
+    """Update a Telegram topic name with the silent/active icon prefix."""
+    resolved_chat = session_manager.resolve_chat_id(str(user_id), str(thread_id))
+    try:
+        titled = session_manager.get_titled_name(window_id)
+        await bot.edit_forum_topic(
+            chat_id=resolved_chat, message_thread_id=thread_id, name=titled
+        )
+    except Exception as e:
+        logger.debug(f"Failed to update topic name: {e}")
+
+
 # --- Command handlers ---
 
 
@@ -203,7 +225,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     thread_id = _get_thread_id(update)
-    wid = session_manager.resolve_window_for_thread(user.id, thread_id)
+    wid = session_manager.resolve_window_for_thread(str(user.id), _str_tid(thread_id))
     if not wid:
         await safe_reply(update.message, "❌ No session bound to this topic.")
         return
@@ -222,7 +244,7 @@ async def screenshot_command(
         return
 
     thread_id = _get_thread_id(update)
-    wid = session_manager.resolve_window_for_thread(user.id, thread_id)
+    wid = session_manager.resolve_window_for_thread(str(user.id), _str_tid(thread_id))
     if not wid:
         await safe_reply(update.message, "❌ No session bound to this topic.")
         return
@@ -260,13 +282,13 @@ async def unbind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await safe_reply(update.message, "❌ This command only works in a topic.")
         return
 
-    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    wid = session_manager.get_window_for_thread(str(user.id), str(thread_id))
     if not wid:
         await safe_reply(update.message, "❌ No session bound to this topic.")
         return
 
     display = session_manager.get_display_name(wid)
-    session_manager.unbind_thread(user.id, thread_id)
+    session_manager.unbind_thread(str(user.id), str(thread_id))
     await clear_topic_state(user.id, thread_id, context.bot, context.user_data)
 
     await safe_reply(
@@ -286,7 +308,7 @@ async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     thread_id = _get_thread_id(update)
-    wid = session_manager.resolve_window_for_thread(user.id, thread_id)
+    wid = session_manager.resolve_window_for_thread(str(user.id), _str_tid(thread_id))
     if not wid:
         await safe_reply(update.message, "❌ No session bound to this topic.")
         return
@@ -302,6 +324,36 @@ async def esc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await safe_reply(update.message, "⎋ Sent Escape")
 
 
+async def silent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle silent mode for the bound session."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+
+    thread_id = _get_thread_id(update)
+    wid = session_manager.resolve_window_for_thread(str(user.id), _str_tid(thread_id))
+    if not wid:
+        await safe_reply(update.message, "❌ No session bound to this topic.")
+        return
+
+    # Parse optional on/off argument
+    args = context.args
+    if args and args[0].lower() in ("on", "off"):
+        new_silent = args[0].lower() == "on"
+    else:
+        new_silent = not session_manager.is_silent(wid)
+
+    session_manager.set_silent(wid, new_silent)
+    status = "ON" if new_silent else "OFF"
+    await safe_reply(update.message, f"🔇 Silent mode: {status}")
+
+    # Update topic name with silent/active icon
+    if thread_id is not None:
+        await _set_topic_title(context.bot, user.id, thread_id, wid)
+
+
 async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fetch Claude Code usage stats from TUI and send to Telegram."""
     user = update.effective_user
@@ -311,7 +363,7 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     thread_id = _get_thread_id(update)
-    wid = session_manager.resolve_window_for_thread(user.id, thread_id)
+    wid = session_manager.resolve_window_for_thread(str(user.id), _str_tid(thread_id))
     if not wid:
         await safe_reply(update.message, "No session bound to this topic.")
         return
@@ -335,7 +387,7 @@ async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     # Try to parse structured usage info
-    from .terminal_parser import parse_usage_output
+    from ...terminal_parser import parse_usage_output
 
     usage = parse_usage_output(pane_text)
     if usage and usage.parsed_lines:
@@ -361,6 +413,7 @@ _KEYS_SEND_MAP: dict[str, tuple[str, bool, bool]] = {
     "ent": ("Enter", False, False),
     "spc": ("Space", False, False),
     "tab": ("Tab", False, False),
+    "stab": ("BTab", False, False),
     "cc": ("C-c", False, False),
 }
 
@@ -374,8 +427,30 @@ _KEY_LABELS: dict[str, str] = {
     "ent": "⏎ Enter",
     "spc": "␣ Space",
     "tab": "⇥ Tab",
+    "stab": "⇤ S-Tab",
     "cc": "^C",
 }
+
+# Interactive UI key dispatch: (callback prefix, tmux key, answer label)
+# Escape and Refresh are handled separately (different post-action behaviour).
+_ASK_KEY_MAP: list[tuple[str, str, str]] = [
+    (CB_ASK_UP, "Up", "↑"),
+    (CB_ASK_DOWN, "Down", "↓"),
+    (CB_ASK_LEFT, "Left", "←"),
+    (CB_ASK_RIGHT, "Right", "→"),
+    (CB_ASK_ENTER, "Enter", "⏎ Enter"),
+    (CB_ASK_SPACE, "Space", "␣ Space"),
+    (CB_ASK_TAB, "Tab", "⇥ Tab"),
+    (CB_ASK_STAB, "BTab", "⇤ S-Tab"),
+]
+
+
+def _match_ask_key(data: str) -> tuple[str, str, str] | None:
+    """Match callback data against interactive UI key prefixes."""
+    for prefix, tmux_key, label in _ASK_KEY_MAP:
+        if data.startswith(prefix):
+            return prefix, tmux_key, label
+    return None
 
 
 def _build_screenshot_keyboard(window_id: str) -> InlineKeyboardMarkup:
@@ -392,6 +467,7 @@ def _build_screenshot_keyboard(window_id: str) -> InlineKeyboardMarkup:
             [btn("␣ Space", "spc"), btn("↑", "up"), btn("⇥ Tab", "tab")],
             [btn("←", "lt"), btn("↓", "dn"), btn("→", "rt")],
             [btn("⎋ Esc", "esc"), btn("^C", "cc"), btn("⏎ Enter", "ent")],
+            [btn("⇤ S-Tab", "stab")],
             [
                 InlineKeyboardButton(
                     "🔄 Refresh",
@@ -414,7 +490,7 @@ async def topic_closed_handler(
     if thread_id is None:
         return
 
-    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    wid = session_manager.get_window_for_thread(str(user.id), str(thread_id))
     if wid:
         display = session_manager.get_display_name(wid)
         w = await tmux_manager.find_window_by_id(wid)
@@ -433,7 +509,7 @@ async def topic_closed_handler(
                 user.id,
                 thread_id,
             )
-        session_manager.unbind_thread(user.id, thread_id)
+        session_manager.unbind_thread(str(user.id), str(thread_id))
         # Clean up all memory state for this topic
         await clear_topic_state(user.id, thread_id, context.bot, context.user_data)
     else:
@@ -463,20 +539,22 @@ async def topic_edited_handler(
     if thread_id is None:
         return
 
-    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    wid = session_manager.get_window_for_thread(str(user.id), str(thread_id))
     if not wid:
         logger.debug(
             "Topic edited: no binding (user=%d, thread=%d)", user.id, thread_id
         )
         return
 
+    # Strip silent/active icon prefix before storing the clean name
+    clean_name = session_manager.strip_silent_icon(new_name)
     old_name = session_manager.get_display_name(wid)
-    await tmux_manager.rename_window(wid, new_name)
-    session_manager.update_display_name(wid, new_name)
+    await tmux_manager.rename_window(wid, clean_name)
+    session_manager.update_display_name(wid, clean_name)
     logger.info(
         "Topic renamed: '%s' -> '%s' (window=%s, user=%d, thread=%d)",
         old_name,
-        new_name,
+        clean_name,
         wid,
         user.id,
         thread_id,
@@ -500,12 +578,12 @@ async def forward_command_handler(
     # messages with message_thread_id. Do NOT remove — see session.py docs.
     chat = update.effective_chat
     if chat and chat.type in ("group", "supergroup"):
-        session_manager.set_group_chat_id(user.id, thread_id, chat.id)
+        session_manager.set_group_chat_id(str(user.id), _str_tid(thread_id), chat.id)
 
     cmd_text = update.message.text or ""
     # The full text is already a slash command like "/clear" or "/compact foo"
     cc_slash = cmd_text.split("@")[0]  # strip bot mention
-    wid = session_manager.resolve_window_for_thread(user.id, thread_id)
+    wid = session_manager.resolve_window_for_thread(str(user.id), _str_tid(thread_id))
     if not wid:
         await safe_reply(update.message, "❌ No session bound to this topic.")
         return
@@ -577,7 +655,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat = update.message.chat
     thread_id = _get_thread_id(update)
     if chat.type in ("group", "supergroup") and thread_id is not None:
-        session_manager.set_group_chat_id(user.id, thread_id, chat.id)
+        session_manager.set_group_chat_id(str(user.id), _str_tid(thread_id), chat.id)
 
     # Must be in a named topic
     if thread_id is None:
@@ -587,7 +665,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    wid = session_manager.get_window_for_thread(str(user.id), str(thread_id))
     if wid is None:
         await safe_reply(
             update.message,
@@ -598,7 +676,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     w = await tmux_manager.find_window_by_id(wid)
     if not w:
         display = session_manager.get_display_name(wid)
-        session_manager.unbind_thread(user.id, thread_id)
+        session_manager.unbind_thread(str(user.id), str(thread_id))
         await safe_reply(
             update.message,
             f"❌ Window '{display}' no longer exists. Binding removed.\n"
@@ -659,7 +737,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat = update.message.chat
     thread_id = _get_thread_id(update)
     if chat.type in ("group", "supergroup") and thread_id is not None:
-        session_manager.set_group_chat_id(user.id, thread_id, chat.id)
+        session_manager.set_group_chat_id(str(user.id), _str_tid(thread_id), chat.id)
 
     if thread_id is None:
         await safe_reply(
@@ -668,7 +746,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    wid = session_manager.get_window_for_thread(str(user.id), str(thread_id))
     if wid is None:
         await safe_reply(
             update.message,
@@ -679,7 +757,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     w = await tmux_manager.find_window_by_id(wid)
     if not w:
         display = session_manager.get_display_name(wid)
-        session_manager.unbind_thread(user.id, thread_id)
+        session_manager.unbind_thread(str(user.id), str(thread_id))
         await safe_reply(
             update.message,
             f"❌ Window '{display}' no longer exists. Binding removed.\n"
@@ -745,7 +823,7 @@ async def _capture_bash_output(
         # Wait for the command to start producing output
         await asyncio.sleep(2.0)
 
-        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+        chat_id = session_manager.resolve_chat_id(str(user_id), str(thread_id))
         msg_id: int | None = None
         last_output: str = ""
 
@@ -825,7 +903,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # messages with message_thread_id. Do NOT remove — see session.py docs.
     chat = update.effective_chat
     if chat and chat.type in ("group", "supergroup"):
-        session_manager.set_group_chat_id(user.id, thread_id, chat.id)
+        session_manager.set_group_chat_id(str(user.id), _str_tid(thread_id), chat.id)
 
     text = update.message.text
 
@@ -886,7 +964,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    wid = session_manager.get_window_for_thread(str(user.id), str(thread_id))
     if wid is None:
         # Unbound topic — check for unbound windows first
         all_windows = await tmux_manager.list_windows()
@@ -948,7 +1026,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             user.id,
             thread_id,
         )
-        session_manager.unbind_thread(user.id, thread_id)
+        session_manager.unbind_thread(str(user.id), str(thread_id))
         await safe_reply(
             update.message,
             f"❌ Window '{display}' no longer exists. Binding removed.\n"
@@ -1087,8 +1165,16 @@ async def _create_and_bind_window(
         if pending_thread_id is not None:
             # Thread bind flow: bind thread to newly created window
             session_manager.bind_thread(
-                user.id, pending_thread_id, created_wid, window_name=created_wname
+                str(user.id),
+                str(pending_thread_id),
+                created_wid,
+                window_name=created_wname,
             )
+
+            # Don't rename user-created Telegram topics on bind (upstream PR #73).
+            # Telegram topics are user-named; the silent/active icon is applied only
+            # on explicit /silent toggle. (Slack, which lacks named threads, titles
+            # its assistant threads separately in transports/slack/bot.py.)
 
             status = "Resumed" if resume_session_id else "Created"
             await safe_edit(
@@ -1117,12 +1203,12 @@ async def _create_and_bind_window(
                 )
                 if not send_ok:
                     logger.warning("Failed to forward pending text: %s", send_msg)
-                    resolved_chat = session_manager.resolve_chat_id(
-                        user.id, pending_thread_id
+                    chat_id = session_manager.resolve_chat_id(
+                        str(user.id), str(pending_thread_id)
                     )
                     await safe_send(
                         context.bot,
-                        resolved_chat,
+                        chat_id,
                         f"❌ Failed to send pending message: {send_msg}",
                         message_thread_id=pending_thread_id,
                     )
@@ -1160,7 +1246,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     cb_thread_id = _get_thread_id(update)
     chat = update.effective_chat
     if chat and chat.type in ("group", "supergroup"):
-        session_manager.set_group_chat_id(user.id, cb_thread_id, chat.id)
+        session_manager.set_group_chat_id(str(user.id), _str_tid(cb_thread_id), chat.id)
 
     # History: older/newer pagination
     # Format: hp:<page>:<window_id>:<start>:<end> or hn:<page>:<window_id>:<start>:<end>
@@ -1477,8 +1563,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         display = w.window_name
         clear_window_picker_state(context.user_data)
         session_manager.bind_thread(
-            user.id, thread_id, selected_wid, window_name=display
+            str(user.id), str(thread_id), selected_wid, window_name=display
         )
+
+        # Don't rename user-created Telegram topics on bind (upstream PR #73).
+        # See the create-and-bind path above for the full rationale.
 
         await safe_edit(
             query,
@@ -1498,10 +1587,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             if not send_ok:
                 logger.warning("Failed to forward pending text: %s", send_msg)
-                resolved_chat = session_manager.resolve_chat_id(user.id, thread_id)
+                chat_id = session_manager.resolve_chat_id(
+                    str(user.id), _str_tid(thread_id)
+                )
                 await safe_send(
                     context.bot,
-                    resolved_chat,
+                    chat_id,
                     f"❌ Failed to send pending message: {send_msg}",
                     message_thread_id=thread_id,
                 )
@@ -1572,57 +1663,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif data == "noop":
         await query.answer()
 
-    # Interactive UI: Up arrow
-    elif data.startswith(CB_ASK_UP):
-        window_id = data[len(CB_ASK_UP) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(w.window_id, "Up", enter=False, literal=False)
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer()
-
-    # Interactive UI: Down arrow
-    elif data.startswith(CB_ASK_DOWN):
-        window_id = data[len(CB_ASK_DOWN) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Down", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer()
-
-    # Interactive UI: Left arrow
-    elif data.startswith(CB_ASK_LEFT):
-        window_id = data[len(CB_ASK_LEFT) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Left", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer()
-
-    # Interactive UI: Right arrow
-    elif data.startswith(CB_ASK_RIGHT):
-        window_id = data[len(CB_ASK_RIGHT) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Right", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer()
-
-    # Interactive UI: Escape
+    # Interactive UI: Escape (special — clears interactive mode)
     elif data.startswith(CB_ASK_ESC):
         window_id = data[len(CB_ASK_ESC) :]
         thread_id = _get_thread_id(update)
@@ -1634,49 +1675,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await clear_interactive_msg(user.id, context.bot, thread_id)
         await query.answer("⎋ Esc")
 
-    # Interactive UI: Enter
-    elif data.startswith(CB_ASK_ENTER):
-        window_id = data[len(CB_ASK_ENTER) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Enter", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer("⏎ Enter")
-
-    # Interactive UI: Space
-    elif data.startswith(CB_ASK_SPACE):
-        window_id = data[len(CB_ASK_SPACE) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(
-                w.window_id, "Space", enter=False, literal=False
-            )
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer("␣ Space")
-
-    # Interactive UI: Tab
-    elif data.startswith(CB_ASK_TAB):
-        window_id = data[len(CB_ASK_TAB) :]
-        thread_id = _get_thread_id(update)
-        w = await tmux_manager.find_window_by_id(window_id)
-        if w:
-            await tmux_manager.send_keys(w.window_id, "Tab", enter=False, literal=False)
-            await asyncio.sleep(0.5)
-            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
-        await query.answer("⇥ Tab")
-
-    # Interactive UI: refresh display
+    # Interactive UI: refresh display (no key sent)
     elif data.startswith(CB_ASK_REFRESH):
         window_id = data[len(CB_ASK_REFRESH) :]
         thread_id = _get_thread_id(update)
         await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
         await query.answer("🔄")
+
+    # Interactive UI: navigation keys (data-driven dispatch)
+    elif (ask_match := _match_ask_key(data)) is not None:
+        prefix, tmux_key, label = ask_match
+        window_id = data[len(prefix) :]
+        thread_id = _get_thread_id(update)
+        w = await tmux_manager.find_window_by_id(window_id)
+        if w:
+            await tmux_manager.send_keys(
+                w.window_id, tmux_key, enter=False, literal=False
+            )
+            await asyncio.sleep(0.5)
+            await handle_interactive_ui(context.bot, user.id, window_id, thread_id)
+        await query.answer(label)
 
     # Screenshot quick keys: send key to tmux window
     elif data.startswith(CB_KEYS_PREFIX):
@@ -1744,7 +1762,10 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         logger.info(f"No active users for session {msg.session_id}")
         return
 
-    for user_id, wid, thread_id in active_users:
+    for user_id_str, wid, thread_id_str in active_users:
+        # Convert str IDs to int for Telegram API calls
+        user_id = int(user_id_str)
+        thread_id: int | None = int(thread_id_str) if thread_id_str else None
         # Handle interactive tools specially - capture terminal and send UI
         if msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use":
             # Mark interactive mode BEFORE sleeping so polling skips this window
@@ -1763,7 +1784,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                     try:
                         file_size = Path(session.file_path).stat().st_size
                         session_manager.update_user_window_offset(
-                            user_id, wid, file_size
+                            user_id_str, wid, file_size
                         )
                     except OSError:
                         pass
@@ -1812,7 +1833,9 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             if session and session.file_path:
                 try:
                     file_size = Path(session.file_path).stat().st_size
-                    session_manager.update_user_window_offset(user_id, wid, file_size)
+                    session_manager.update_user_window_offset(
+                        user_id_str, wid, file_size
+                    )
                 except OSError:
                     pass
 
@@ -1896,6 +1919,9 @@ def create_bot() -> Application:
     application = (
         Application.builder()
         .token(config.telegram_bot_token)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
         .rate_limiter(AIORateLimiter(max_retries=5))
         .post_init(post_init)
         .post_shutdown(post_shutdown)
@@ -1908,6 +1934,7 @@ def create_bot() -> Application:
     application.add_handler(CommandHandler("esc", esc_command))
     application.add_handler(CommandHandler("unbind", unbind_command))
     application.add_handler(CommandHandler("usage", usage_command))
+    application.add_handler(CommandHandler("silent", silent_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
     # Topic closed event — auto-kill associated window
     application.add_handler(

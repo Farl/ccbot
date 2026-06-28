@@ -53,6 +53,7 @@ class WindowState:
     session_id: str = ""
     cwd: str = ""
     window_name: str = ""
+    silent: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -61,6 +62,8 @@ class WindowState:
         }
         if self.window_name:
             d["window_name"] = self.window_name
+        if self.silent:
+            d["silent"] = True
         return d
 
     @classmethod
@@ -69,6 +72,7 @@ class WindowState:
             session_id=data.get("session_id", ""),
             cwd=data.get("cwd", ""),
             window_name=data.get("window_name", ""),
+            silent=data.get("silent", False),
         )
 
 
@@ -97,8 +101,8 @@ class SessionManager:
     """
 
     window_states: dict[str, WindowState] = field(default_factory=dict)
-    user_window_offsets: dict[int, dict[str, int]] = field(default_factory=dict)
-    thread_bindings: dict[int, dict[int, str]] = field(default_factory=dict)
+    user_window_offsets: dict[str, dict[str, int]] = field(default_factory=dict)
+    thread_bindings: dict[str, dict[str, str]] = field(default_factory=dict)
     # window_id -> display name (window_name)
     window_display_names: dict[str, str] = field(default_factory=dict)
     # "user_id:thread_id" -> group chat_id (for supergroup forum topic routing)
@@ -148,11 +152,11 @@ class SessionManager:
                     for k, v in state.get("window_states", {}).items()
                 }
                 self.user_window_offsets = {
-                    int(uid): offsets
+                    str(uid): offsets
                     for uid, offsets in state.get("user_window_offsets", {}).items()
                 }
                 self.thread_bindings = {
-                    int(uid): {int(tid): wid for tid, wid in bindings.items()}
+                    str(uid): {str(tid): wid for tid, wid in bindings.items()}
                     for uid, bindings in state.get("thread_bindings", {}).items()
                 }
                 self.window_display_names = state.get("window_display_names", {})
@@ -254,7 +258,7 @@ class SessionManager:
 
         # --- Migrate thread_bindings ---
         for uid, bindings in self.thread_bindings.items():
-            new_bindings: dict[int, str] = {}
+            new_bindings: dict[str, str] = {}
             for tid, val in bindings.items():
                 if self._is_window_id(val):
                     if val in live_ids:
@@ -274,7 +278,7 @@ class SessionManager:
                             changed = True
                         else:
                             logger.info(
-                                "Dropping stale thread binding: user=%d, thread=%d, wid=%s",
+                                "Dropping stale thread binding: user=%s, thread=%s, wid=%s",
                                 uid,
                                 tid,
                                 val,
@@ -290,7 +294,7 @@ class SessionManager:
                         changed = True
                     else:
                         logger.info(
-                            "Dropping old-format thread binding: user=%d, thread=%d, name=%s",
+                            "Dropping old-format thread binding: user=%s, thread=%s, name=%s",
                             uid,
                             tid,
                             val,
@@ -399,11 +403,53 @@ class SessionManager:
             len(stale_keys),
         )
 
+    # --- Silent mode management ---
+
+    def is_silent(self, window_id: str) -> bool:
+        """Check if a window is in silent mode."""
+        if window_id not in self.window_states:
+            return False
+        return self.window_states[window_id].silent
+
+    def set_silent(self, window_id: str, silent: bool) -> None:
+        """Set silent mode for a window and persist."""
+        state = self.get_window_state(window_id)
+        state.silent = silent
+        self._save_state()
+        logger.info(
+            "Silent mode %s for window_id %s", "ON" if silent else "OFF", window_id
+        )
+
     # --- Display name management ---
+
+    # Icons prefixed to topic/thread names to indicate silent mode state.
+    SILENT_ICON = "🔇"
+    ACTIVE_ICON = "🔔"
 
     def get_display_name(self, window_id: str) -> str:
         """Get display name for a window_id, fallback to window_id itself."""
         return self.window_display_names.get(window_id, window_id)
+
+    def get_titled_name(self, window_id: str, name: str | None = None) -> str:
+        """Get display name with silent/active icon prefix.
+
+        Args:
+            window_id: The window to get the title for.
+            name: Optional override for the display name portion.
+        """
+        if name is None:
+            name = self.get_display_name(window_id)
+        icon = self.SILENT_ICON if self.is_silent(window_id) else self.ACTIVE_ICON
+        return f"{icon} {name}"
+
+    @staticmethod
+    def strip_silent_icon(name: str) -> str:
+        """Remove silent/active icon prefix from a name if present."""
+        for icon in (SessionManager.SILENT_ICON, SessionManager.ACTIVE_ICON):
+            prefix = f"{icon} "
+            if name.startswith(prefix):
+                return name[len(prefix) :]
+        return name
 
     def update_display_name(self, window_id: str, new_name: str) -> None:
         """Update the display name for a window and persist state."""
@@ -417,7 +463,7 @@ class SessionManager:
     # --- Group chat ID management (supergroup forum topic routing) ---
 
     def set_group_chat_id(
-        self, user_id: int, thread_id: int | None, chat_id: int
+        self, user_id: str, thread_id: str | None, chat_id: int
     ) -> None:
         """Store the group chat_id for a user+thread combination.
 
@@ -430,23 +476,23 @@ class SessionManager:
         Without it, all outbound messages in forum topics fail with
         "Message thread not found". See commit history: 5afc111 → 26cb81f → PR #23.
         """
-        tid = thread_id or 0
+        tid = thread_id or "0"
         key = f"{user_id}:{tid}"
         if self.group_chat_ids.get(key) != chat_id:
             self.group_chat_ids[key] = chat_id
             self._save_state()
             logger.debug(
-                "Stored group chat_id: user=%d, thread=%s, chat_id=%d",
+                "Stored group chat_id: user=%s, thread=%s, chat_id=%d",
                 user_id,
                 thread_id,
                 chat_id,
             )
 
-    def resolve_chat_id(self, user_id: int, thread_id: int | None = None) -> int:
+    def resolve_chat_id(self, user_id: str, thread_id: str | None = None) -> int:
         """Resolve the correct chat_id for sending messages.
 
         Returns the stored group chat_id when a thread_id is present and a
-        mapping exists, otherwise falls back to user_id (for private chats).
+        mapping exists, otherwise falls back to int(user_id) (for private chats).
 
         Every outbound Telegram API call (send_message, edit_message_text,
         delete_message, send_chat_action, edit_forum_topic, etc.) MUST use
@@ -458,7 +504,7 @@ class SessionManager:
             group_id = self.group_chat_ids.get(key)
             if group_id is not None:
                 return group_id
-        return user_id
+        return int(user_id)
 
     async def wait_for_session_map_entry(
         self, window_id: str, timeout: float = 5.0, interval: float = 0.5
@@ -711,7 +757,7 @@ class SessionManager:
     # --- User window offset management ---
 
     def update_user_window_offset(
-        self, user_id: int, window_id: str, offset: int
+        self, user_id: str, window_id: str, offset: int
     ) -> None:
         """Update the user's last read offset for a window."""
         if user_id not in self.user_window_offsets:
@@ -722,13 +768,13 @@ class SessionManager:
     # --- Thread binding management ---
 
     def bind_thread(
-        self, user_id: int, thread_id: int, window_id: str, window_name: str = ""
+        self, user_id: str, thread_id: str, window_id: str, window_name: str = ""
     ) -> None:
-        """Bind a Telegram topic thread to a tmux window.
+        """Bind a topic thread to a tmux window.
 
         Args:
-            user_id: Telegram user ID
-            thread_id: Telegram topic thread ID
+            user_id: User ID (str for both Telegram int IDs and Slack string IDs)
+            thread_id: Thread/topic ID (str)
             window_id: Tmux window ID (e.g. '@0')
             window_name: Display name for the window (optional)
         """
@@ -740,14 +786,14 @@ class SessionManager:
         self._save_state()
         display = window_name or self.get_display_name(window_id)
         logger.info(
-            "Bound thread %d -> window_id %s (%s) for user %d",
+            "Bound thread %s -> window_id %s (%s) for user %s",
             thread_id,
             window_id,
             display,
             user_id,
         )
 
-    def unbind_thread(self, user_id: int, thread_id: int) -> str | None:
+    def unbind_thread(self, user_id: str, thread_id: str) -> str | None:
         """Remove a thread binding. Returns the previously bound window_id, or None."""
         bindings = self.thread_bindings.get(user_id)
         if not bindings or thread_id not in bindings:
@@ -757,14 +803,14 @@ class SessionManager:
             del self.thread_bindings[user_id]
         self._save_state()
         logger.info(
-            "Unbound thread %d (was %s) for user %d",
+            "Unbound thread %s (was %s) for user %s",
             thread_id,
             window_id,
             user_id,
         )
         return window_id
 
-    def get_window_for_thread(self, user_id: int, thread_id: int) -> str | None:
+    def get_window_for_thread(self, user_id: str, thread_id: str) -> str | None:
         """Look up the window_id bound to a thread."""
         bindings = self.thread_bindings.get(user_id)
         if not bindings:
@@ -773,8 +819,8 @@ class SessionManager:
 
     def resolve_window_for_thread(
         self,
-        user_id: int,
-        thread_id: int | None,
+        user_id: str,
+        thread_id: str | None,
     ) -> str | None:
         """Resolve the tmux window_id for a user's thread.
 
@@ -784,7 +830,7 @@ class SessionManager:
             return None
         return self.get_window_for_thread(user_id, thread_id)
 
-    def iter_thread_bindings(self) -> Iterator[tuple[int, int, str]]:
+    def iter_thread_bindings(self) -> Iterator[tuple[str, str, str]]:
         """Iterate all thread bindings as (user_id, thread_id, window_id).
 
         Provides encapsulated access to thread_bindings without exposing
@@ -797,12 +843,12 @@ class SessionManager:
     async def find_users_for_session(
         self,
         session_id: str,
-    ) -> list[tuple[int, str, int]]:
+    ) -> list[tuple[str, str, str]]:
         """Find all users whose thread-bound window maps to the given session_id.
 
         Returns list of (user_id, window_id, thread_id) tuples.
         """
-        result: list[tuple[int, str, int]] = []
+        result: list[tuple[str, str, str]] = []
         for user_id, thread_id, window_id in self.iter_thread_bindings():
             resolved = await self.resolve_session_for_window(window_id)
             if resolved and resolved.session_id == session_id:

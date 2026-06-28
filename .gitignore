@@ -69,3 +69,5 @@ venv.bak/
 # Project specific
 .uv/
 uv.lock
+.env.local
+.claude/settings.local.json

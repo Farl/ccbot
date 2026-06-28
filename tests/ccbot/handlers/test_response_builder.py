@@ -1,6 +1,6 @@
 """Tests for response_builder.build_response_parts."""
 
-from ccbot.handlers.response_builder import build_response_parts
+from ccbot.transports.telegram.handlers.response_builder import build_response_parts
 from ccbot.transcript_parser import TranscriptParser
 
 EXP_START = TranscriptParser.EXPANDABLE_QUOTE_START

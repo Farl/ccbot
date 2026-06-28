@@ -56,9 +56,10 @@ def _find_ccbot_path() -> str:
     return "ccbot"
 
 
-def _is_hook_installed(settings: dict) -> bool:
-    """Check if ccbot hook is already installed in the settings.
+def _find_existing_hook(settings: dict) -> tuple[dict, dict] | None:
+    """Find an existing ccbot hook entry in settings.
 
+    Returns (entry_dict, hook_dict) if found, None otherwise.
     Detects both 'ccbot hook' and full paths like '/path/to/ccbot hook'.
     """
     hooks = settings.get("hooks", {})
@@ -74,12 +75,15 @@ def _is_hook_installed(settings: dict) -> bool:
             cmd = h.get("command", "")
             # Match 'ccbot hook' or paths ending with 'ccbot hook'
             if cmd == _HOOK_COMMAND_SUFFIX or cmd.endswith("/" + _HOOK_COMMAND_SUFFIX):
-                return True
-    return False
+                return entry, h
+    return None
 
 
 def _install_hook() -> int:
-    """Install the ccbot hook into Claude's settings.json.
+    """Install or update the ccbot hook in Claude's settings.json.
+
+    If a ccbot hook already exists but points to a stale path,
+    updates it to the current ccbot executable path.
 
     Returns 0 on success, 1 on error.
     """
@@ -96,25 +100,33 @@ def _install_hook() -> int:
             print(f"Error reading {settings_file}: {e}", file=sys.stderr)
             return 1
 
-    # Check if already installed
-    if _is_hook_installed(settings):
-        logger.info("Hook already installed in %s", settings_file)
-        print(f"Hook already installed in {settings_file}")
-        return 0
-
-    # Find the full path to ccbot
+    # Find the current ccbot path
     ccbot_path = _find_ccbot_path()
     hook_command = f"{ccbot_path} hook"
-    hook_config = {"type": "command", "command": hook_command, "timeout": 5}
-    logger.info("Installing hook command: %s", hook_command)
 
-    # Install the hook
-    if "hooks" not in settings:
-        settings["hooks"] = {}
-    if "SessionStart" not in settings["hooks"]:
-        settings["hooks"]["SessionStart"] = []
+    # Check if hook already exists
+    existing = _find_existing_hook(settings)
+    if existing is not None:
+        _, hook_dict = existing
+        old_command = hook_dict.get("command", "")
+        if old_command == hook_command:
+            logger.info("Hook already installed in %s", settings_file)
+            print(f"Hook already installed in {settings_file}")
+            return 0
+        # Path changed — update in place
+        logger.info("Updating hook path: %s -> %s", old_command, hook_command)
+        hook_dict["command"] = hook_command
+    else:
+        # Fresh install
+        hook_config = {"type": "command", "command": hook_command, "timeout": 5}
+        logger.info("Installing hook command: %s", hook_command)
 
-    settings["hooks"]["SessionStart"].append({"hooks": [hook_config]})
+        if "hooks" not in settings:
+            settings["hooks"] = {}
+        if "SessionStart" not in settings["hooks"]:
+            settings["hooks"]["SessionStart"] = []
+
+        settings["hooks"]["SessionStart"].append({"hooks": [hook_config]})
 
     # Write back
     try:
@@ -126,8 +138,9 @@ def _install_hook() -> int:
         print(f"Error writing {settings_file}: {e}", file=sys.stderr)
         return 1
 
-    logger.info("Hook installed successfully in %s", settings_file)
-    print(f"Hook installed successfully in {settings_file}")
+    action = "updated" if existing else "installed"
+    logger.info("Hook %s successfully in %s", action, settings_file)
+    print(f"Hook {action} successfully in {settings_file}")
     return 0
 
 

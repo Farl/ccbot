@@ -19,9 +19,9 @@ import logging
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 
-from ..session import session_manager
-from ..terminal_parser import extract_interactive_content, is_interactive_ui
-from ..tmux_manager import tmux_manager
+from ....session import session_manager
+from ....terminal_parser import extract_interactive_content, is_interactive_ui
+from ....tmux_manager import tmux_manager
 from .callback_data import (
     CB_ASK_DOWN,
     CB_ASK_ENTER,
@@ -30,6 +30,7 @@ from .callback_data import (
     CB_ASK_REFRESH,
     CB_ASK_RIGHT,
     CB_ASK_SPACE,
+    CB_ASK_STAB,
     CB_ASK_TAB,
     CB_ASK_UP,
 )
@@ -138,6 +139,14 @@ def _build_interactive_keyboard(
             ),
         ]
     )
+    # Row 3: mode toggle
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "⇤ S-Tab", callback_data=f"{CB_ASK_STAB}{window_id}"[:64]
+            ),
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -154,7 +163,9 @@ async def handle_interactive_ui(
     False otherwise.
     """
     ikey = (user_id, thread_id or 0)
-    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+    chat_id = session_manager.resolve_chat_id(
+        str(user_id), str(thread_id) if thread_id is not None else None
+    )
     w = await tmux_manager.find_window_by_id(window_id)
     if not w:
         return False
@@ -266,7 +277,9 @@ async def clear_interactive_msg(
         msg_id,
     )
     if bot and msg_id:
-        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+        chat_id = session_manager.resolve_chat_id(
+            str(user_id), str(thread_id) if thread_id is not None else None
+        )
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception:

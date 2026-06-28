@@ -15,7 +15,7 @@ Key function:
 
 from ..markdown_v2 import convert_markdown_tables
 from ..telegram_sender import split_message
-from ..transcript_parser import TranscriptParser
+from ....transcript_parser import TranscriptParser
 
 
 def build_response_parts(

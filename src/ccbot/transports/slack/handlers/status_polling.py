@@ -1,13 +1,14 @@
 """Terminal status line polling for Slack transport.
 
 Background task that polls terminal status lines for all thread-bound windows
-at 1-second intervals. Sends or edits Slack messages to show current status.
-Detects interactive UIs and delegates to the interactive UI handler.
-Also sets Slack Assistant thread status (the native "thinking" indicator).
+at 1-second intervals. Detects interactive UIs and delegates to the interactive
+UI handler. The working status ("Thinking…/Ideating…") is shown exclusively via
+the Slack Assistant thread status (the native "thinking" indicator) — never as a
+chat message, which would clutter the thread and auto-clear the indicator.
 
 Key state:
-  _status_msgs: (user_id, thread_ts) -> (msg_ts, window_id, last_text)
-  _last_thread_status: (user_id, thread_ts) -> last setStatus text (for dedup)
+  _last_thread_status: (user_id, thread_ts) -> last setStatus text (dedups the
+    empty/clear case only; non-empty status is re-asserted every poll)
 """
 
 import asyncio
@@ -28,7 +29,6 @@ from .interactive_ui import (
     get_interactive_window,
     handle_interactive_ui,
 )
-from .message_sender import delete_message, edit_message, send_message
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +41,7 @@ _CONTENT_SETTLE_TIME = 3.0
 # (user_id, thread_ts) -> monotonic time of last content delivery
 _last_content_time: dict[tuple[str, str], float] = {}
 
-# (user_id, thread_ts) -> (msg_ts, window_id, last_text)
-_status_msgs: dict[tuple[str, str], tuple[str, str, str]] = {}
-
-# (user_id, thread_ts) -> last text passed to setStatus (for dedup)
+# (user_id, thread_ts) -> last text passed to setStatus (dedups clears only)
 _last_thread_status: dict[tuple[str, str], str] = {}
 
 # Callback set by start_status_polling; signature: (channel, thread_ts, text) -> None
@@ -54,12 +51,25 @@ _set_thread_status: Callable[[str, str, str], Awaitable[None]] | None = None
 async def _sync_thread_status(
     user_id: str, thread_ts: str, channel: str, text: str
 ) -> None:
-    """Set Slack Assistant thread status with dedup."""
+    """Set Slack Assistant thread status.
+
+    Slack auto-clears the assistant thread status whenever the app posts a
+    message to the thread, and again after a 2-minute idle timeout (see
+    assistant.threads.setStatus docs). So a non-empty "thinking" status must be
+    re-asserted on EVERY poll — caching "we already set this text" would leave
+    the indicator blank the moment the first content/tool/status message clears
+    it, which is why the indicator used to appear only briefly then vanish.
+
+    Only the empty (clear) case is deduped: once cleared, repeatedly sending
+    setStatus("") would just spam the API for idle threads with no visible
+    effect. Re-asserts stay within the method's 600/min limit (≤1/s per active
+    thread, matching the poll interval).
+    """
     if _set_thread_status is None:
         return
     key = (user_id, thread_ts)
-    if _last_thread_status.get(key) == text:
-        return  # identical — skip API call
+    if not text and _last_thread_status.get(key) == "":
+        return  # already cleared — skip redundant clear
     _last_thread_status[key] = text
     await _set_thread_status(channel, thread_ts, text)
 
@@ -85,7 +95,7 @@ async def update_status_for_window(
     """Poll terminal and check for interactive UIs and status updates."""
     w = await tmux_manager.find_window_by_id(window_id)
     if not w:
-        await clear_status(user_id, thread_ts, client, channel)
+        await clear_status(user_id, thread_ts, channel)
         return
 
     pane_text = await tmux_manager.capture_pane(w.window_id)
@@ -134,47 +144,35 @@ async def update_status_for_window(
         return
 
     status_line = parse_status_line(pane_text)
-    if not status_line:
-        # Claude may have exited — clear any stale status message + thread status
-        await clear_status(user_id, thread_ts, client, channel)
+    if (
+        not status_line
+        or not config.show_status
+        or session_manager.is_silent(window_id)
+    ):
+        # No active status, indicator disabled, or window silenced — clear the
+        # native thread status (Claude may also have exited).
+        await clear_status(user_id, thread_ts, channel)
         return
-    # Always show thread-level thinking indicator (lightweight, no message spam)
+
+    # Slack's native assistant thread status is the SOLE thinking indicator.
+    # We deliberately never post "Thinking…/Ideating…" as a chat message: it
+    # would clutter the thread and, per Slack, posting any message auto-clears
+    # the status — so the message would fight the very indicator it duplicates.
     await _sync_thread_status(user_id, thread_ts, channel, status_line)
-
-    if not config.show_status or session_manager.is_silent(window_id):
-        return
-
-    skey = (user_id, thread_ts)
-    existing = _status_msgs.get(skey)
-
-    if existing:
-        msg_ts, existing_wid, last_text = existing
-        if existing_wid == window_id and last_text == status_line:
-            return  # Dedup — identical content
-        ok = await edit_message(client, channel, msg_ts, status_line)
-        if ok:
-            _status_msgs[skey] = (msg_ts, window_id, status_line)
-        return
-
-    ts = await send_message(client, channel, status_line, thread_ts=thread_ts)
-    if ts:
-        _status_msgs[skey] = (ts, window_id, status_line)
 
 
 async def clear_status(
     user_id: str,
     thread_ts: str,
-    client: AsyncWebClient,
     channel: str,
 ) -> None:
-    """Remove status message, thread status, and delivery tracking."""
-    key = (user_id, thread_ts)
-    _last_content_time.pop(key, None)
-    _last_thread_status.pop(key, None)
-    existing = _status_msgs.pop(key, None)
-    if existing:
-        msg_ts, _wid, _text = existing
-        await delete_message(client, channel, msg_ts)
+    """Clear the native thread status indicator and drop content tracking.
+
+    Leaves the `_last_thread_status` entry as "" (managed by
+    `_sync_thread_status`) so repeated idle polls don't re-send setStatus("").
+    Full per-thread teardown on unbind happens in the polling loop.
+    """
+    _last_content_time.pop((user_id, thread_ts), None)
     await _sync_thread_status(user_id, thread_ts, channel, "")
 
 
@@ -198,7 +196,6 @@ async def start_status_polling(
                         key = (uid, tid)
                         _last_content_time.pop(key, None)
                         _last_thread_status.pop(key, None)
-                        _status_msgs.pop(key, None)
                         logger.info(
                             "Cleaned up stale binding: user=%s thread=%s window_id=%s",
                             uid,
@@ -220,24 +217,3 @@ async def start_status_polling(
             logger.error("Status poll loop error: %s", e)
 
         await asyncio.sleep(STATUS_POLL_INTERVAL)
-
-
-def take_status_ts(user_id: str, thread_ts: str) -> str | None:
-    """Return and remove the current status message ts for a thread.
-
-    Called by the queue worker when converting a status message to content
-    (edit in-place). Returns None if no status message is tracked.
-    """
-    key = (user_id, thread_ts)
-    existing = _status_msgs.pop(key, None)
-    if existing:
-        msg_ts, _wid, _text = existing
-        return msg_ts
-    return None
-
-
-def register_status_ts(
-    user_id: str, thread_ts: str, msg_ts: str, window_id: str, text: str
-) -> None:
-    """Register a newly-sent status message ts (called by queue worker after send)."""
-    _status_msgs[(user_id, thread_ts)] = (msg_ts, window_id, text)

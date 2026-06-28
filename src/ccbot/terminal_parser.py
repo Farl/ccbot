@@ -203,21 +203,48 @@ def is_interactive_ui(pane_text: str) -> bool:
 
 # ── Status line parsing ─────────────────────────────────────────────────
 
-# Spinner characters Claude Code uses in its status line
+# Spinner characters Claude Code uses in its status line.
 STATUS_SPINNERS = frozenset(["·", "✻", "✽", "✶", "✳", "✢"])
+
+# The distinctive spinner glyphs essentially never occur in normal output, so
+# they can be matched anywhere in the region above the chrome.  The plain bullet
+# "·" doubles as a list bullet, so it stays adjacency-gated (see below).
+_DISTINCTIVE_SPINNERS = STATUS_SPINNERS - {"·"}
+
+# How many lines above the chrome separator to scan for the spinner.  The
+# spinner usually sits just above the chrome, but transient overlays can be
+# injected between them — a "/btw" Tip (⎿ Tip: …) and the periodic "How is
+# Claude doing this session?" rating prompt push it several lines up.  10 lines
+# clears those overlays with margin while staying within the live-status block.
+_STATUS_SCAN_LINES = 10
+
+# Claude Code shows "esc to interrupt" in the footer only while a turn is
+# actively running.  Its absence means an idle prompt — and a spinner-glyph line
+# that lingers then is a *completed* summary (e.g. "✻ Brewed for 30m 55s"), not a
+# live status.  Gating on this marker avoids reporting that stale summary as an
+# active status (which would pin the thinking indicator indefinitely).
+_RUNNING_MARKER = re.compile(r"esc to interrupt", re.IGNORECASE)
 
 
 def parse_status_line(pane_text: str) -> str | None:
-    """Extract the Claude Code status line from terminal output.
+    """Extract the Claude Code *active* status line from terminal output.
 
-    The status line (spinner + working text) appears immediately above
-    the chrome separator (a full line of ``─`` characters).  We locate
-    the separator first, then check the line just above it — this avoids
-    false positives from ``·`` bullets in Claude's regular output.
+    Returns the working text (spinner + verb) only while a turn is running;
+    returns None when Claude is idle, even if a completed-summary spinner line
+    (e.g. "✻ Brewed for 30m 55s") is still on screen.  "Running" is detected via
+    the ``esc to interrupt`` footer marker.
 
-    Returns the text after the spinner, or None if no status line found.
+    The status line lives in the region just above the chrome separator (a full
+    line of ``─`` characters).  We locate the separator, then scan upward for a
+    line starting with a spinner glyph.  Scanning (rather than checking only the
+    adjacent line) is required because Claude injects transient overlays — a
+    ``/btw`` Tip and the periodic session rating prompt — between the spinner and
+    the chrome, which would otherwise hide the status.  The distinctive glyphs
+    (✻✽✶✳✢) are matched anywhere in the scan window; the ambiguous ``·`` bullet
+    is accepted only as the first non-empty line above the chrome, so list
+    bullets in regular output aren't mistaken for a status.
     """
-    if not pane_text:
+    if not pane_text or not _RUNNING_MARKER.search(pane_text):
         return None
 
     lines = pane_text.split("\n")
@@ -234,15 +261,16 @@ def parse_status_line(pane_text: str) -> str | None:
     if chrome_idx is None:
         return None  # No chrome visible — can't determine status
 
-    # Check lines just above the separator (skip blanks, up to 4 lines)
-    for i in range(chrome_idx - 1, max(chrome_idx - 5, -1), -1):
+    first_nonempty = True
+    for i in range(chrome_idx - 1, max(chrome_idx - 1 - _STATUS_SCAN_LINES, -1), -1):
         line = lines[i].strip()
         if not line:
             continue
-        if line[0] in STATUS_SPINNERS:
+        if line[0] in _DISTINCTIVE_SPINNERS:
             return line[1:].strip()
-        # First non-empty line above separator isn't a spinner → no status
-        return None
+        if line[0] == "·" and first_nonempty:
+            return line[1:].strip()
+        first_nonempty = False
     return None
 
 

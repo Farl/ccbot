@@ -3,14 +3,16 @@
 Provides FIFO queue processing with:
   - Message merging (consecutive content messages up to 3800 chars)
   - tool_use/tool_result pairing (tool_result edits tool_use message in-place)
-  - Status-to-content conversion (first content edits existing status message)
   - Content-type formatting (build_response_parts)
+
+The working status ("Thinking…/Ideating…") is shown only via the native Slack
+thread status, managed entirely by the status-polling loop — this queue never
+posts or re-asserts status (see status_polling.py).
 
 Fork of transports/telegram/handlers/message_queue.py adapted for Slack:
   - user_id is str (not int)
   - thread_ts is str (not int thread_id)
   - channel stored in MessageTask (resolved at enqueue time)
-  - Status coordination via take_status_ts/register_status_ts (no direct dict access)
 
 Key components:
   - MessageTask: queued message task
@@ -28,11 +30,8 @@ from typing import Literal
 
 from slack_sdk.web.async_client import AsyncWebClient
 
-from ....terminal_parser import parse_status_line
-from ....tmux_manager import tmux_manager
 from ..splitter import split_message
-from .message_sender import delete_message, edit_message, send_message
-from .status_polling import register_status_ts, take_status_ts
+from .message_sender import edit_message, send_message
 
 logger = logging.getLogger(__name__)
 
@@ -195,10 +194,15 @@ async def _process_content_task(
     user_id: str,
     task: MessageTask,
 ) -> None:
-    """Process one content task: send or edit message."""
+    """Process one content task: send or edit message.
+
+    The native thinking indicator is *not* re-asserted here: posting content
+    auto-clears the Slack thread status, but the 1s status-polling loop
+    re-asserts it on its next tick, so the indicator recovers within ≤1s
+    without this hot path having to re-capture and re-parse the pane.
+    """
     channel = task.channel
     thread_ts = task.thread_ts
-    wid = task.window_id
 
     # 1. tool_result: edit the matching tool_use message in-place
     if task.content_type == "tool_result" and task.tool_use_id:
@@ -206,24 +210,13 @@ async def _process_content_task(
         edit_ts = _tool_msg_ids.pop(tkey, None)
         if edit_ts:
             full_text = "\n\n".join(task.parts)
-            ok = await edit_message(client, channel, edit_ts, full_text)
-            if ok:
-                await _check_and_send_status(client, user_id, wid, channel, thread_ts)
+            if await edit_message(client, channel, edit_ts, full_text):
                 return
             # edit failed — fall through to send new message
 
-    # 2. Send content; convert status message to content on first part
-    first_part = True
+    # 2. Send content as messages
     last_ts: str | None = None
     for part in task.parts:
-        if first_part:
-            first_part = False
-            converted_ts = await _convert_status_to_content(
-                client, user_id, thread_ts, wid, channel, part
-            )
-            if converted_ts:
-                last_ts = converted_ts
-                continue
         sent_ts = await send_message(client, channel, part, thread_ts=thread_ts)
         if sent_ts:
             last_ts = sent_ts
@@ -231,57 +224,6 @@ async def _process_content_task(
     # 3. Record tool_use ts for later in-place editing by tool_result
     if last_ts and task.tool_use_id and task.content_type == "tool_use":
         _tool_msg_ids[(task.tool_use_id, user_id, thread_ts)] = last_ts
-
-    # 4. After content, re-check terminal for a status line
-    await _check_and_send_status(client, user_id, wid, channel, thread_ts)
-
-
-async def _convert_status_to_content(
-    client: AsyncWebClient,
-    user_id: str,
-    thread_ts: str,
-    window_id: str,
-    channel: str,
-    content_text: str,
-) -> str | None:
-    """Edit the existing status message to show content.
-
-    Uses take_status_ts() to atomically claim the status message.
-    Returns the message ts on success, None if nothing to convert.
-    """
-    status_ts = take_status_ts(user_id, thread_ts)
-    if not status_ts:
-        return None
-    ok = await edit_message(client, channel, status_ts, content_text)
-    if ok:
-        return status_ts
-    # Edit failed (message deleted/expired) — delete silently
-    await delete_message(client, channel, status_ts)
-    return None
-
-
-async def _check_and_send_status(
-    client: AsyncWebClient,
-    user_id: str,
-    window_id: str,
-    channel: str,
-    thread_ts: str,
-) -> None:
-    """After delivering content, check terminal for status and send if present."""
-    queue = _message_queues.get(user_id)
-    if queue and not queue.empty():
-        return
-    w = await tmux_manager.find_window_by_id(window_id)
-    if not w:
-        return
-    pane_text = await tmux_manager.capture_pane(w.window_id)
-    if not pane_text:
-        return
-    status_line = parse_status_line(pane_text)
-    if status_line:
-        ts = await send_message(client, channel, status_line, thread_ts=thread_ts)
-        if ts:
-            register_status_ts(user_id, thread_ts, ts, window_id, status_line)
 
 
 # ---------------------------------------------------------------------------

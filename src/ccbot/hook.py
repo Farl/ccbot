@@ -20,12 +20,139 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 # Validate session_id looks like a UUID
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+# Non-interactive Claude invocations that ccbot must NOT register as a
+# window->session mapping. Only the interactive TUI that ccbot launches in a
+# tmux window should own a window's session_map entry. A headless `claude -p` /
+# SDK / background invocation spawned from inside an interactive session inherits
+# that session's TMUX_PANE, so its SessionStart hook would otherwise overwrite
+# session_map[<tmux>:<window_id>] and silently steal message delivery from the
+# real session. (Incident: a daily-reminder `claude -p` run from a Bash tool
+# inside the interactive session hijacked the mapping, dropping all later replies.)
+#
+# CLAUDE_CODE_CHILD_SESSION is deliberately NOT used as a signal: it is also set
+# to "1" on legit interactive sessions whenever ccbot/tmux was itself started
+# from within a Claude session, so it false-positives here. CLAUDE_CODE_ENTRYPOINT
+# is undocumented, so it is only a secondary signal; the primary, documented
+# signal is the `-p`/`--print`/`--bg`/`--remote-control` flag on the nearest
+# claude ancestor's command line.
+_HEADLESS_CLAUDE_FLAGS = frozenset({"-p", "--print", "--bg", "--remote-control"})
+_HEADLESS_ENTRYPOINTS = frozenset({"sdk-cli", "sdk-py", "sdk-ts"})
+
+
+def _executable_basename(cmdline: str) -> str:
+    """Basename of the real executable in a process command line.
+
+    Skips a leading `env` and its options / NAME=VALUE assignments (e.g.
+    `env -u CLAUDECODE claude`) so the underlying program is identified.
+    """
+    tokens = cmdline.split()
+    i = 0
+    if i < len(tokens) and os.path.basename(tokens[i]) == "env":
+        i += 1
+        while i < len(tokens):
+            t = tokens[i]
+            if t == "-u":  # `-u NAME` removes a var — skip the flag and its argument
+                i += 2
+                continue
+            if t.startswith("-") or "=" in t:
+                i += 1
+                continue
+            break
+    return os.path.basename(tokens[i]) if i < len(tokens) else ""
+
+
+def _is_claude_process(cmdline: str) -> bool:
+    """True if a command line is a `claude` executable.
+
+    Guards against shells whose script text merely mentions "claude" by checking
+    the resolved executable basename, not a substring.
+    """
+    return _executable_basename(cmdline) == "claude"
+
+
+def _claude_cmdline_is_headless(cmdline: str) -> bool:
+    """True if a `claude` command line carries a non-interactive (print/SDK/bg) flag."""
+    return any(tok in _HEADLESS_CLAUDE_FLAGS for tok in cmdline.split())
+
+
+def _ps_field(pid: int, field: str) -> str | None:
+    """Read a single `ps -o <field>=` value for a pid, or None on failure."""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", f"{field}=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    return out.stdout.strip() or None
+
+
+def _find_nearest_claude_cmdline(
+    start_pid: int,
+    get_parent: Callable[[int], int | None],
+    get_cmdline: Callable[[int], str | None],
+    max_depth: int = 8,
+) -> str | None:
+    """Walk up the process tree from start_pid, returning the command line of the
+    nearest ancestor that is a `claude` process (or None).
+
+    "Nearest" matters: a headless `claude -p` run inside an interactive session
+    has the `-p` claude as the nearest ancestor and the interactive claude higher
+    up; checking only the nearest avoids misclassifying a legitimately nested
+    interactive session.
+    """
+    pid: int | None = start_pid
+    for _ in range(max_depth):
+        if pid is None or pid <= 1:
+            break
+        cmdline = get_cmdline(pid)
+        if cmdline and _is_claude_process(cmdline):
+            return cmdline
+        pid = get_parent(pid)
+    return None
+
+
+def _is_noninteractive_invocation() -> bool:
+    """True if this SessionStart belongs to a non-interactive Claude invocation
+    (headless `-p` / SDK / background) that ccbot must not register.
+
+    Fail-open: when neither signal is conclusive, return False so behavior matches
+    the historical default — a misfire reverts to old behavior, never breaks all
+    tracking.
+    """
+    entrypoint = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "").strip()
+    if entrypoint in _HEADLESS_ENTRYPOINTS:
+        logger.info(
+            "Skipping non-interactive Claude session (entrypoint=%s)", entrypoint
+        )
+        return True
+
+    def _parent(pid: int) -> int | None:
+        raw = _ps_field(pid, "ppid")
+        try:
+            return int(raw) if raw else None
+        except ValueError:
+            return None
+
+    cmdline = _find_nearest_claude_cmdline(
+        os.getppid(), _parent, lambda pid: _ps_field(pid, "command")
+    )
+    if cmdline and _claude_cmdline_is_headless(cmdline):
+        logger.info(
+            "Skipping non-interactive Claude session (claude cmdline: %s)", cmdline
+        )
+        return True
+    return False
+
 
 _CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 
@@ -197,6 +324,12 @@ def hook_main() -> None:
 
     if event != "SessionStart":
         logger.debug("Ignoring non-SessionStart event: %s", event)
+        return
+
+    # Ignore headless `claude -p` / SDK / background invocations. They can share
+    # an interactive session's TMUX_PANE and would otherwise hijack that window's
+    # session_map entry, silently breaking delivery. See _is_noninteractive_invocation.
+    if _is_noninteractive_invocation():
         return
 
     # Get tmux session:window key for the pane running this hook.

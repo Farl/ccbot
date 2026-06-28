@@ -72,10 +72,13 @@ Or manually in `~/.claude/settings.json`:
   Private use — we do **not** contribute changes back upstream.
 - The `upstream` remote is not configured by default. Add it with:
   `git remote add upstream git@github.com:six-ddc/ccbot.git`
-- **Branches:** `main` is the unified Telegram + Slack bot (PR #1 merged the Slack
-  transport in on 2026-06-28). `feat/slack-transport-universal` is the Slack dev branch
-  and is where ccbot is run locally. When syncing upstream, integrate into **both** and
-  keep them reconciled (merge is the established pattern; PR #1's flow is the template).
+- **Branches:** `main` is the **single maintained branch** — the unified Telegram +
+  Slack bot, and where ccbot runs locally. Sync upstream by integrating `upstream/main`
+  into `main` (merge is the established pattern). History: the Slack transport was
+  developed on `feat/slack-transport-universal` and merged via PR #1 on 2026-06-28; once
+  the two branches were byte-identical we consolidated to main-only (2026-06-28) to drop
+  the reconcile overhead. The `origin/feat/slack-transport-universal` ref is kept for
+  history but no longer maintained; the local branch was deleted.
 - **Topic/thread auto-titling is a Slack-side concern, not Telegram.** Slack assistant
   threads have no user-given name, so Slack titles them via `_set_thread_title`
   (`assistant_threads_setTitle`) in `transports/slack/bot.py` — keep that. Telegram topics

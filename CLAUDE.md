@@ -72,6 +72,12 @@ Or manually in `~/.claude/settings.json`:
   Private use — we do **not** contribute changes back upstream.
 - The `upstream` remote is not configured by default. Add it with:
   `git remote add upstream git@github.com:six-ddc/ccbot.git`
+- **Always scope `gh` to the fork: `gh pr create --repo Farl/ccbot ...`** (and
+  `gh pr merge/list/view --repo Farl/ccbot`). Because this is a GitHub fork, a
+  bare `gh pr create` defaults to the **upstream** `six-ddc/ccbot` and would
+  open a public PR against it — which both fails confusingly ("No commits
+  between main and ...") and violates "do not contribute back upstream". Same
+  trap for `gh pr list`, which otherwise lists upstream's PRs, not ours.
 - **Branches:** `main` is the **single maintained branch** — the unified Telegram +
   Slack bot, and where ccbot runs locally. Sync upstream by integrating `upstream/main`
   into `main` (merge is the established pattern). History: the Slack transport was

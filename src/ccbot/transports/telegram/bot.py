@@ -598,7 +598,10 @@ async def forward_command_handler(
     logger.info(
         "Forwarding command %s to window %s (user=%d)", cc_slash, display, user.id
     )
-    await update.message.chat.send_action(ChatAction.TYPING)
+    try:
+        await update.message.chat.send_action(ChatAction.TYPING)
+    except Exception as e:
+        logger.warning("send_action(TYPING) failed, continuing to injection: %s", e)
     success, message = await session_manager.send_to_window(wid, cc_slash)
     if success:
         await safe_reply(update.message, f"⚡ [{display}] Sent: {cc_slash}")
@@ -697,7 +700,10 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         text_to_send = f"(image attached: {file_path})"
 
-    await update.message.chat.send_action(ChatAction.TYPING)
+    try:
+        await update.message.chat.send_action(ChatAction.TYPING)
+    except Exception as e:
+        logger.warning("send_action(TYPING) failed, continuing to injection: %s", e)
     clear_status_msg_info(user.id, thread_id)
 
     success, message = await session_manager.send_to_window(wid, text_to_send)
@@ -774,7 +780,10 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await safe_reply(update.message, f"⚠ Transcription failed: {e}")
         return
 
-    await update.message.chat.send_action(ChatAction.TYPING)
+    try:
+        await update.message.chat.send_action(ChatAction.TYPING)
+    except Exception as e:
+        logger.warning("send_action(TYPING) failed, continuing to injection: %s", e)
     clear_status_msg_info(user.id, thread_id)
 
     success, message = await session_manager.send_to_window(wid, text)
@@ -1025,25 +1034,43 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    await update.message.chat.send_action(ChatAction.TYPING)
-    await enqueue_status_update(context.bot, user.id, wid, None, thread_id=thread_id)
+    # Cosmetic / outbound-Telegram steps below must NEVER abort the handler
+    # before the message is injected into tmux. On flaky networks the "typing…"
+    # indicator (send_action) and status enqueue time out (telegram.error.TimedOut);
+    # since the update offset has already advanced, Telegram won't redeliver, so
+    # any exception here silently drops the user's message and forces a resend.
+    try:
+        await update.message.chat.send_action(ChatAction.TYPING)
+    except Exception as e:
+        logger.warning("send_action(TYPING) failed, continuing to injection: %s", e)
+    try:
+        await enqueue_status_update(
+            context.bot, user.id, wid, None, thread_id=thread_id
+        )
+    except Exception as e:
+        logger.warning("enqueue_status_update failed, continuing to injection: %s", e)
 
     # Cancel any running bash capture — new message pushes pane content down
     _cancel_bash_capture(user.id, thread_id)
 
     # Check for pending interactive UI before sending text.
     # This catches UIs (permission prompts, etc.) that status polling might have missed.
-    pane_text = await tmux_manager.capture_pane(w.window_id)
-    if pane_text and is_interactive_ui(pane_text):
-        # UI detected — show it to user, then send text (acts as Enter)
-        logger.info(
-            "Detected pending interactive UI before sending text (user=%d, thread=%s)",
-            user.id,
-            thread_id,
-        )
-        await handle_interactive_ui(context.bot, user.id, wid, thread_id)
-        # Small delay to let UI render in Telegram before text arrives
-        await asyncio.sleep(0.3)
+    # capture_pane is a local tmux call, but handle_interactive_ui hits the network —
+    # isolate the whole block so a failure can't prevent the injection below.
+    try:
+        pane_text = await tmux_manager.capture_pane(w.window_id)
+        if pane_text and is_interactive_ui(pane_text):
+            # UI detected — show it to user, then send text (acts as Enter)
+            logger.info(
+                "Detected pending interactive UI before sending text (user=%d, thread=%s)",
+                user.id,
+                thread_id,
+            )
+            await handle_interactive_ui(context.bot, user.id, wid, thread_id)
+            # Small delay to let UI render in Telegram before text arrives
+            await asyncio.sleep(0.3)
+    except Exception as e:
+        logger.warning("interactive-UI precheck failed, continuing to injection: %s", e)
 
     success, message = await session_manager.send_to_window(wid, text)
     if not success:
@@ -1144,8 +1171,10 @@ async def _create_and_bind_window(
                 window_name=created_wname,
             )
 
-            # Rename the topic to match the window name (with silent/active icon)
-            await _set_topic_title(context.bot, user.id, pending_thread_id, created_wid)
+            # Don't rename user-created Telegram topics on bind (upstream PR #73).
+            # Telegram topics are user-named; the silent/active icon is applied only
+            # on explicit /silent toggle. (Slack, which lacks named threads, titles
+            # its assistant threads separately in transports/slack/bot.py.)
 
             status = "Resumed" if resume_session_id else "Created"
             await safe_edit(
@@ -1537,8 +1566,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             str(user.id), str(thread_id), selected_wid, window_name=display
         )
 
-        # Rename the topic to match the window name (with silent/active icon)
-        await _set_topic_title(context.bot, user.id, thread_id, selected_wid)
+        # Don't rename user-created Telegram topics on bind (upstream PR #73).
+        # See the create-and-bind path above for the full rationale.
 
         await safe_edit(
             query,
@@ -1767,6 +1796,13 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         # Any non-interactive message means the interaction is complete — delete the UI message
         if get_interactive_msg_id(user_id, thread_id):
             await clear_interactive_msg(user_id, bot, thread_id)
+
+        # Skip tool call notifications when CCBOT_SHOW_TOOL_CALLS=false
+        if not config.show_tool_calls and msg.content_type in (
+            "tool_use",
+            "tool_result",
+        ):
+            continue
 
         parts = build_response_parts(
             msg.text,

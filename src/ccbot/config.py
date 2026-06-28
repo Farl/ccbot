@@ -92,9 +92,15 @@ class Config:
 
         self.show_user_messages = _env_bool("CCBOT_SHOW_USER_MESSAGES")
         self.show_thinking = _env_bool("CCBOT_SHOW_THINKING")
-        self.show_tool_use = _env_bool("CCBOT_SHOW_TOOL_USE")
-        self.show_tool_result = _env_bool("CCBOT_SHOW_TOOL_RESULT")
         self.show_status = _env_bool("CCBOT_SHOW_STATUS")
+
+        # CCBOT_SHOW_TOOL_CALLS acts as a master switch for both tool_use and
+        # tool_result; the per-kind flags allow finer-grained suppression.
+        show_tool_calls = _env_bool("CCBOT_SHOW_TOOL_CALLS")
+        self.show_tool_use = show_tool_calls and _env_bool("CCBOT_SHOW_TOOL_USE")
+        self.show_tool_result = show_tool_calls and _env_bool("CCBOT_SHOW_TOOL_RESULT")
+        # Derived flag consumed by the queue worker (bot.py); true if either kind shows.
+        self.show_tool_calls = self.show_tool_use or self.show_tool_result
 
         # Show hidden (dot) directories in directory browser
         self.show_hidden_dirs = _env_bool("CCBOT_SHOW_HIDDEN_DIRS", "false")

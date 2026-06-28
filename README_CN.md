@@ -23,9 +23,11 @@ CCBot 让你**通过 Telegram 无缝接管同一个会话**。核心设计思路
 - **基于话题的会话** — 每个 Telegram 话题 1:1 映射到一个 tmux 窗口和 Claude 会话
 - **实时通知** — 接收助手回复、思考过程、工具调用/结果、本地命令输出的 Telegram 消息
 - **交互式 UI** — 通过内联键盘操作 AskUserQuestion、ExitPlanMode 和权限提示
+- **语音消息** — 语音消息通过 OpenAI 转录为文字并转发
 - **发送消息** — 通过 tmux 按键将文字转发给 Claude Code
 - **斜杠命令转发** — 任何 `/command` 直接发送给 Claude Code（如 `/clear`、`/compact`、`/cost`）
 - **创建新会话** — 通过目录浏览器从 Telegram 启动 Claude Code 会话
+- **恢复会话** — 选择目录中已有的 Claude 会话继续上次的工作
 - **关闭会话** — 关闭话题自动终止关联的 tmux 窗口
 - **消息历史** — 分页浏览对话历史（默认显示最新）
 - **Hook 会话追踪** — 通过 `SessionStart` hook 自动关联 tmux 窗口与 Claude 会话
@@ -89,6 +91,12 @@ ALLOWED_USERS=your_telegram_user_id
 | `TMUX_SESSION_NAME` | `ccbot` | tmux 会话名称 |
 | `CLAUDE_COMMAND` | `claude` | 新窗口中运行的命令 |
 | `MONITOR_POLL_INTERVAL` | `2.0` | 轮询间隔（秒） |
+| `CCBOT_SHOW_HIDDEN_DIRS` | `false` | 在目录浏览器中显示隐藏（点开头）目录 |
+| `OPENAI_API_KEY` | _(无)_ | OpenAI API 密钥，用于语音消息转录 |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI API 基础 URL（用于代理或兼容 API） |
+
+消息格式化目前固定为 HTML，使用 `chatgpt-md-converter`（`chatgpt_md_converter` 包）。
+不再提供运行时切换到 MarkdownV2 的开关。
 
 > 如果在 VPS 上运行且没有交互终端来批准权限，可以考虑：
 > ```
@@ -161,11 +169,12 @@ uv run ccbot
 1. 在 Telegram 群组中创建新话题
 2. 在话题中发送任意消息
 3. 弹出目录浏览器 — 选择项目目录
-4. 自动创建 tmux 窗口，启动 `claude`，并转发待处理的消息
+4. 如果该目录下已有 Claude 会话，会弹出会话选择器 — 选择恢复已有会话或创建新会话
+5. 自动创建 tmux 窗口，启动 `claude`（恢复时使用 `--resume`），并转发待处理的消息
 
 **发送消息：**
 
-话题绑定会话后，直接在话题中发送文字即可 — 文字会通过 tmux 按键转发给 Claude Code。
+话题绑定会话后，直接在话题中发送文字或语音消息即可 — 文字会通过 tmux 按键转发给 Claude Code，语音消息会自动转录为文字后转发。
 
 **关闭会话：**
 
@@ -198,6 +207,10 @@ uv run ccbot
 - **本地命令输出** — 命令的标准输出（如 `git status`），前缀为 `❯ command_name`
 
 通知发送到绑定了该会话窗口的话题中。
+
+格式说明：
+- Telegram 消息使用 `HTML` parse mode
+- 通过 `chatgpt-md-converter` 做 Markdown→HTML 转换与 HTML 标签感知拆分，保证长代码块拆分稳定
 
 ## 在 tmux 中运行 Claude Code
 
@@ -234,7 +247,7 @@ claude
 - **窗口 ID 为中心** — 所有内部状态以 tmux 窗口 ID（如 `@0`、`@12`）为键，而非窗口名称。窗口名称仅作为显示名称保留。同一目录可有多个窗口
 - **基于 Hook 的会话追踪** — Claude Code 的 `SessionStart` Hook 写入 `session_map.json`；监控器每次轮询读取它以自动检测会话变化
 - **工具调用配对** — `tool_use_id` 跨轮询周期追踪；工具结果直接编辑原始的工具调用 Telegram 消息
-- **MarkdownV2 + 降级** — 所有消息通过 `telegramify-markdown` 转换，解析失败时降级为纯文本
+- **HTML + 降级** — 所有消息通过 `chatgpt-md-converter` 转换为 Telegram HTML，解析失败时降级为纯文本
 - **解析层不截断** — 完整保留内容；发送层按 Telegram 4096 字符限制拆分
 
 ## 数据存储
@@ -260,9 +273,9 @@ src/ccbot/
 ├── monitor_state.py       # 监控状态持久化（字节偏移量）
 ├── transcript_parser.py   # Claude Code JSONL 对话记录解析
 ├── terminal_parser.py     # 终端面板解析（交互式 UI + 状态行）
-├── markdown_v2.py         # Markdown → Telegram MarkdownV2 转换
-├── telegram_sender.py     # 消息拆分 + 同步 HTTP 发送
+├── html_converter.py      # Markdown → Telegram HTML 转换 + HTML 感知拆分
 ├── screenshot.py          # 终端文字 → PNG 图片（支持 ANSI 颜色）
+├── transcribe.py          # 通过 OpenAI API 进行语音转文字
 ├── utils.py               # 通用工具（原子 JSON 写入、JSONL 辅助函数）
 ├── tmux_manager.py        # tmux 窗口管理（列出、创建、发送按键、终止）
 ├── fonts/                 # 截图渲染用字体

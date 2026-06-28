@@ -1,6 +1,7 @@
 # CCBot
 
 [中文文档](README_CN.md)
+[Русская документация](README_RU.md)
 
 Control Claude Code sessions remotely via Telegram — monitor, interact, and manage AI coding sessions running in tmux.
 
@@ -25,9 +26,11 @@ In fact, CCBot itself was built this way — iterating on itself through Claude 
 - **Topic-based sessions** — Each Telegram topic maps 1:1 to a tmux window and Claude session
 - **Real-time notifications** — Get Telegram messages for assistant responses, thinking content, tool use/result, and local command output
 - **Interactive UI** — Navigate AskUserQuestion, ExitPlanMode, and Permission Prompts via inline keyboard
+- **Voice messages** — Voice messages are transcribed via OpenAI and forwarded as text
 - **Send messages** — Forward text to Claude Code via tmux keystrokes
 - **Slash command forwarding** — Send any `/command` directly to Claude Code (e.g. `/clear`, `/compact`, `/cost`)
 - **Create new sessions** — Start Claude Code sessions from Telegram via directory browser
+- **Resume sessions** — Pick up where you left off by resuming an existing Claude session in a directory
 - **Kill sessions** — Close a topic to auto-kill the associated tmux window
 - **Message history** — Browse conversation history with pagination (newest first)
 - **Hook-based session tracking** — Auto-associates tmux windows with Claude sessions via `SessionStart` hook
@@ -92,6 +95,11 @@ ALLOWED_USERS=your_telegram_user_id
 | `CLAUDE_COMMAND`        | `claude`   | Command to run in new windows                    |
 | `MONITOR_POLL_INTERVAL` | `2.0`      | Polling interval in seconds                      |
 | `CCBOT_SHOW_HIDDEN_DIRS` | `false` | Show hidden (dot) directories in directory browser |
+| `OPENAI_API_KEY` | _(none)_ | OpenAI API key for voice message transcription |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI API base URL (for proxies or compatible APIs) |
+
+Message formatting is always HTML via `chatgpt-md-converter` (`chatgpt_md_converter` package).
+There is no runtime formatter switch to MarkdownV2.
 
 > If running on a VPS where there's no interactive terminal to approve permissions, consider:
 >
@@ -165,11 +173,12 @@ Any unrecognized `/command` is also forwarded to Claude Code as-is (e.g. `/revie
 1. Create a new topic in the Telegram group
 2. Send any message in the topic
 3. A directory browser appears — select the project directory
-4. A tmux window is created, `claude` starts, and your pending message is forwarded
+4. If the directory has existing Claude sessions, a session picker appears — choose one to resume or start fresh
+5. A tmux window is created, `claude` starts (with `--resume` if resuming), and your pending message is forwarded
 
 **Sending messages:**
 
-Once a topic is bound to a session, just send text in that topic — it gets forwarded to Claude Code via tmux keystrokes.
+Once a topic is bound to a session, just send text or voice messages in that topic — text gets forwarded to Claude Code via tmux keystrokes, and voice messages are automatically transcribed and forwarded as text.
 
 **Killing a session:**
 
@@ -203,6 +212,10 @@ The monitor polls session JSONL files every 2 seconds and sends notifications fo
 - **Local command output** — stdout from commands like `git status`, prefixed with `❯ command_name`
 
 Notifications are delivered to the topic bound to the session's window.
+
+Formatting note:
+- Telegram messages are rendered with parse mode `HTML` using `chatgpt-md-converter`
+- Long messages are split with HTML tag awareness to preserve code blocks and formatting
 
 ## Running Claude Code in tmux
 
@@ -246,9 +259,9 @@ src/ccbot/
 ├── monitor_state.py       # Monitor state persistence (byte offsets)
 ├── transcript_parser.py   # Claude Code JSONL transcript parsing
 ├── terminal_parser.py     # Terminal pane parsing (interactive UI + status line)
-├── markdown_v2.py         # Markdown → Telegram MarkdownV2 conversion
-├── telegram_sender.py     # Message splitting + synchronous HTTP send
+├── html_converter.py      # Markdown → Telegram HTML conversion + HTML-aware splitting
 ├── screenshot.py          # Terminal text → PNG image with ANSI color support
+├── transcribe.py          # Voice-to-text transcription via OpenAI API
 ├── utils.py               # Shared utilities (atomic JSON writes, JSONL helpers)
 ├── tmux_manager.py        # Tmux window management (list, create, send keys, kill)
 ├── fonts/                 # Bundled fonts for screenshot rendering

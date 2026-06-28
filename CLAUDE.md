@@ -66,6 +66,30 @@ Or manually in `~/.claude/settings.json`:
 }
 ```
 
+## Upstream & Fork Maintenance
+
+- This repo (`Farl/ccbot`) is a **private fork** of **`six-ddc/ccbot`** (upstream).
+  Private use — we do **not** contribute changes back upstream.
+- The `upstream` remote is not configured by default. Add it with:
+  `git remote add upstream git@github.com:six-ddc/ccbot.git`
+- **Branches:** `main` is the unified Telegram + Slack bot (PR #1 merged the Slack
+  transport in on 2026-06-28). `feat/slack-transport-universal` is the Slack dev branch
+  and is where ccbot is run locally. When syncing upstream, integrate into **both** and
+  keep them reconciled (merge is the established pattern; PR #1's flow is the template).
+- **Topic/thread auto-titling is a Slack-side concern, not Telegram.** Slack assistant
+  threads have no user-given name, so Slack titles them via `_set_thread_title`
+  (`assistant_threads_setTitle`) in `transports/slack/bot.py` — keep that. Telegram topics
+  are user-named, so we follow upstream PR #73 (`350c653`): do **not** rename topics on
+  bind. The Telegram silent/active icon still updates on explicit `/silent` toggle.
+- **Notification filters:** granular flags (`show_thinking`/`show_tool_use`/
+  `show_tool_result`/`show_user_messages`/`show_status`, gated in `session_monitor.py` for
+  both transports) coexist with upstream's `CCBOT_SHOW_TOOL_CALLS`, which is treated as a
+  master switch for tool_use+tool_result; `config.show_tool_calls` is derived for the
+  queue-worker gate in `bot.py`.
+- **Running inside a Claude Code session** (e.g. developing ccbot from ccbot): set
+  `CLAUDE_COMMAND=env -u CLAUDECODE claude` in `.env`, or child `claude` processes fail with
+  "cannot be launched inside another Claude Code session". tmux is a hard prerequisite.
+
 ## Architecture Details
 
 See @.claude/rules/architecture.md for full system diagram and module inventory.

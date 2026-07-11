@@ -50,6 +50,23 @@ class NewMessage:
     tool_name: str | None = None  # For tool_use messages, the tool name
     image_data: list[tuple[str, bytes]] | None = None  # From tool_result images
 
+    @property
+    def is_noise(self) -> bool:
+        """True for the categories a silenced window suppresses.
+
+        Silent mode drops the noise — user echo, thinking, tool use/results,
+        and slash-command echo (``local_command``, e.g. "❯ /clear", which is
+        assistant-role but is really an echo of the user's action) — but keeps
+        the assistant's replies. Judged at delivery so the check applies to the
+        specific bound window (see handle_new_message).
+        """
+        return self.role == "user" or self.content_type in (
+            "thinking",
+            "tool_use",
+            "tool_result",
+            "local_command",
+        )
+
 
 class SessionMonitor:
     """Monitors Claude Code sessions for new assistant messages.
@@ -266,10 +283,6 @@ class SessionMonitor:
             logger.error("Error reading session file %s: %s", file_path, e)
         return new_entries
 
-    def _build_session_to_window_map(self) -> dict[str, str]:
-        """Build reverse map session_id -> window_id from _last_session_map."""
-        return {sid: wid for wid, sid in self._last_session_map.items()}
-
     async def check_for_updates(self, active_session_ids: set[str]) -> list[NewMessage]:
         """Check all sessions for new assistant messages.
 
@@ -280,10 +293,6 @@ class SessionMonitor:
             active_session_ids: Set of session IDs currently in session_map
         """
         new_messages = []
-        session_to_window = self._build_session_to_window_map()
-
-        # Deferred import to avoid circular dependency
-        from .session import session_manager as _sm
 
         # Scan projects to get available session files
         sessions = await self.scan_projects()
@@ -353,13 +362,15 @@ class SessionMonitor:
                 else:
                     self._pending_tools.pop(session_info.session_id, None)
 
-                # Silent mode: per-window override forces all filters off
-                wid = session_to_window.get(session_info.session_id)
-                silent = wid is not None and _sm.is_silent(wid)
-                show_user = not silent and config.show_user_messages
-                show_thinking = not silent and config.show_thinking
-                show_tool_use = not silent and config.show_tool_use
-                show_tool_result = not silent and config.show_tool_result
+                # Global notification filters only. Per-window silent mode is
+                # applied later, at DELIVERY (handle_new_message), where the
+                # exact bound window is known — the session→window reverse map
+                # here is lossy when a session has more than one window, which is
+                # what made silent apply to the wrong window.
+                show_user = config.show_user_messages
+                show_thinking = config.show_thinking
+                show_tool_use = config.show_tool_use
+                show_tool_result = config.show_tool_result
 
                 for entry in parsed_entries:
                     if not entry.text and not entry.image_data:

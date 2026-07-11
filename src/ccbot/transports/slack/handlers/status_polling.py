@@ -144,15 +144,16 @@ async def update_status_for_window(
         return
 
     status_line = parse_status_line(pane_text)
-    if (
-        not status_line
-        or not config.show_status
-        or session_manager.is_silent(window_id)
-    ):
-        # No active status, indicator disabled, or window silenced — clear the
-        # native thread status (Claude may also have exited).
+    if not status_line or not config.show_status:
+        # No active status or the indicator is disabled — clear the native
+        # thread status (Claude may also have exited).
         await clear_status(user_id, thread_ts, channel)
         return
+
+    # NOTE: silent mode does NOT suppress this indicator. It's a lightweight
+    # native status (not a chat message), and while silent hides the noisy
+    # thinking/tool messages, the "still working…" indicator is exactly the
+    # quiet signal the user relies on to see the session is alive.
 
     # Slack's native assistant thread status is the SOLE thinking indicator.
     # We deliberately never post "Thinking…/Ideating…" as a chat message: it

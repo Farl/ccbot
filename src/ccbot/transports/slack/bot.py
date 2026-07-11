@@ -939,6 +939,10 @@ async def handle_new_message(msg: NewMessage) -> None:
     """Session monitor callback — deliver Claude messages to Slack threads."""
     users = await session_manager.find_users_for_session(msg.session_id)
     for user_id, window_id, thread_id in users:
+        # Silent mode is per bound window: drop the noise (thinking/tool/user
+        # echo) here, where we know the exact target window, and keep replies.
+        if msg.is_noise and session_manager.is_silent(window_id):
+            continue
         channel = await _resolve_dm_channel(user_id)
         if not channel:
             continue

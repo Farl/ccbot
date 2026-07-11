@@ -31,7 +31,9 @@ from .handlers.directory_browser import (
     ACTION_SESS_CANCEL,
     ACTION_SESS_NEW,
     ACTION_SESS_SELECT,
+    ACTION_SESS_TOGGLE_SDK,
     build_directory_browser,
+    bind_thread_to_existing_window,
     build_session_picker,
     clear_browse_state,
     clear_session_picker_state,
@@ -174,7 +176,28 @@ async def _handle_user_message(
         # Thread is bound — check window is alive before forwarding
         window = await tmux_manager.find_window_by_id(window_id)
         if not window:
-            # Window died — unbind and fall through to directory browser
+            # find_window_by_id collapses transient tmux failures to None, so
+            # confirm the window is *definitively* gone before unbinding —
+            # otherwise a momentary tmux hiccup would drop a live binding.
+            exists = await tmux_manager.window_exists(window_id)
+            if exists is not False:
+                # True (lookup blipped) or None (tmux busy/ambiguous): don't
+                # unbind on an unconfirmed failure — ask the user to retry.
+                logger.info(
+                    "Could not confirm window %s gone (exists=%s); keeping binding",
+                    window_id,
+                    exists,
+                )
+                retry_msg = "⚠️ 暫時無法確認 session 狀態，請稍後再送一次。"
+                if say is not None:
+                    await say(text=retry_msg, channel=channel, thread_ts=thread_ts)
+                else:
+                    assert app is not None
+                    await send_message(
+                        app.client, channel, retry_msg, thread_ts=thread_ts
+                    )
+                return
+            # Window genuinely gone — unbind and fall through to directory browser
             logger.info(
                 "Window %s no longer exists for user=%s thread=%s, unbinding",
                 window_id,
@@ -528,17 +551,44 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                     return
                 session = sessions[idx]
                 clear_session_picker_state(user_id, msg_ts=message_ts)
-                window_id = await create_session_for_thread(
-                    user_id,
-                    thread_ts,
-                    cwd,
-                    resume_session_id=session.session_id,
-                )
+                # If the session is live, attach to its existing window instead
+                # of resuming it into a duplicate window.
+                window_id = None
+                reattached = False
+                if session.is_running:
+                    existing = await session_manager.window_id_for_session(
+                        session.session_id
+                    )
+                    if existing and session_manager.is_window_bound_elsewhere(
+                        existing, user_id, thread_ts
+                    ):
+                        # Already connected to another thread — reattaching would
+                        # fan replies to both. Refuse (don't resume a duplicate).
+                        await client.chat_update(
+                            channel=channel,
+                            ts=message_ts,
+                            text="⚠️ 此 session 已連接到另一個對話，無法重複連接。",
+                            blocks=[],
+                        )
+                        return
+                    if existing and await bind_thread_to_existing_window(
+                        user_id, thread_ts, existing
+                    ):
+                        window_id = existing
+                        reattached = True
+                if window_id is None:
+                    window_id = await create_session_for_thread(
+                        user_id,
+                        thread_ts,
+                        cwd,
+                        resume_session_id=session.session_id,
+                    )
                 if window_id:
+                    verb = "Reconnected to" if reattached else "Resumed"
                     await client.chat_update(
                         channel=channel,
                         ts=message_ts,
-                        text=f"\u2705 Resumed session {session.session_id[:8]}",
+                        text=f"\u2705 {verb} session {session.session_id[:8]}",
                         blocks=[],
                     )
                     display_path = cwd.replace(str(Path.home()), "~")
@@ -592,6 +642,25 @@ def _register_handlers(slack_app: AsyncApp) -> None:
                         text="\u274c Failed to create session",
                         blocks=[],
                     )
+
+            elif action_id == ACTION_SESS_TOGGLE_SDK:
+                # Flip the hide-`-p` filter and re-render in place. Rebuild from
+                # the full set so hidden sessions can come back.
+                picker = build_session_picker(
+                    user_id,
+                    state.get("all_sessions", sessions),
+                    msg_ts=message_ts,
+                    cwd=cwd,
+                    pending_text=pending_text,
+                    thread_ts=thread_ts,
+                    hide_sdk=not state.get("hide_sdk", False),
+                )
+                await client.chat_update(
+                    channel=channel,
+                    ts=message_ts,
+                    text=picker["text"],
+                    blocks=picker["blocks"],
+                )
 
             elif action_id == ACTION_SESS_CANCEL:
                 clear_session_picker_state(user_id, msg_ts=message_ts)

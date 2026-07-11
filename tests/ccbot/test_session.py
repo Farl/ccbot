@@ -32,6 +32,25 @@ class TestThreadBindings:
         result = set(mgr.iter_thread_bindings())
         assert result == {("100", "1", "@1"), ("100", "2", "@2"), ("200", "3", "@3")}
 
+    def test_window_bound_elsewhere_true_other_thread(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_thread("100", "1", "@5")
+        assert mgr.is_window_bound_elsewhere("@5", "100", "2") is True
+
+    def test_window_bound_elsewhere_true_other_user(self, mgr: SessionManager) -> None:
+        mgr.bind_thread("100", "1", "@5")
+        assert mgr.is_window_bound_elsewhere("@5", "200", "9") is True
+
+    def test_window_bound_elsewhere_false_same_thread(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_thread("100", "1", "@5")
+        assert mgr.is_window_bound_elsewhere("@5", "100", "1") is False
+
+    def test_window_bound_elsewhere_false_unbound(self, mgr: SessionManager) -> None:
+        assert mgr.is_window_bound_elsewhere("@5", "100", "1") is False
+
 
 class TestGroupChatId:
     """Tests for group chat_id routing (supergroup forum topic support).

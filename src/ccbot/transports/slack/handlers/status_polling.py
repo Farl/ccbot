@@ -189,8 +189,14 @@ async def start_status_polling(
         try:
             for uid, tid, wid in list(session_manager.iter_thread_bindings()):
                 try:
-                    w = await tmux_manager.find_window_by_id(wid)
-                    if not w:
+                    # Only unbind when the window is *definitively* gone. A
+                    # transient tmux query failure (window_exists → None) must
+                    # not drop a live binding — that's what made sessions "unbind
+                    # themselves" under heavy tmux contention.
+                    exists = await tmux_manager.window_exists(wid)
+                    if exists is None:
+                        continue  # can't tell right now — keep binding, retry next tick
+                    if not exists:
                         session_manager.unbind_thread(uid, tid)
                         # Clean up in-memory tracking dicts for this thread
                         key = (uid, tid)

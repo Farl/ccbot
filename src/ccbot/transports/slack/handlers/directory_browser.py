@@ -34,6 +34,7 @@ ACTION_DIR_PAGE = "dir_page_"
 ACTION_SESS_SELECT = "sess_select_"
 ACTION_SESS_NEW = "sess_new"
 ACTION_SESS_CANCEL = "sess_cancel"
+ACTION_SESS_TOGGLE_SDK = "sess_toggle_sdk"
 
 
 # Per-message browse state: msg_ts -> {path, dirs, page, user_id}
@@ -86,6 +87,26 @@ def clear_session_picker_state(user_id: str, msg_ts: str) -> None:
         _session_picker_states.pop(msg_ts, None)
 
 
+def _session_button_label(session: ClaudeSession) -> str:
+    """Compact button label: a running/mtime prefix, a -p tag, then the summary.
+
+    Kept under Slack's 75-char plain_text button limit.
+    """
+    if session.is_running:
+        prefix = "\U0001f7e2 \u57f7\u884c\u4e2d"  # \ud83d\udfe2 \u57f7\u884c\u4e2d
+    else:
+        try:
+            prefix = time.strftime(
+                "%m-%d %H:%M", time.localtime(os.path.getmtime(session.file_path))
+            )
+        except (OSError, AttributeError):
+            prefix = session.session_id[:8]
+    tag = " [-p]" if session.is_sdk else ""
+    summary = session.summary.replace("\n", " ").strip()
+    label = f"{prefix}{tag} \u00b7 {summary}"
+    return label[:72] + "\u2026" if len(label) > 73 else label
+
+
 def build_session_picker(
     user_id: str,
     sessions: list[ClaudeSession],
@@ -93,16 +114,26 @@ def build_session_picker(
     cwd: str = "",
     pending_text: str | None = None,
     thread_ts: str = "",
+    hide_sdk: bool = False,
 ) -> dict[str, Any]:
     """Build Block Kit session picker for resuming existing Claude sessions.
 
+    Running sessions (currently live in a tmux window) are marked and listed
+    first. SDK / ``claude -p`` sessions are tagged ``[-p]``; the user can hide
+    them with a toggle button (never hidden by default). ``sessions`` is the
+    full list; the displayed subset (what SELECT indexes) is stored so the
+    action handler resolves the right session after a hide/show toggle.
+
     Stores picker state keyed by msg_ts (including pending_text and thread_ts
-    so the action callbacks can forward the original message after session creation).
+    so the action callbacks can forward the original message after creation).
     Returns dict with 'text' and 'blocks' keys.
     """
+    displayed = [s for s in sessions if not (hide_sdk and s.is_sdk)]
     _session_picker_states[msg_ts] = {
         "user_id": user_id,
-        "sessions": sessions,
+        "sessions": displayed,  # index space for ACTION_SESS_SELECT
+        "all_sessions": sessions,  # full set, for the hide/show toggle
+        "hide_sdk": hide_sdk,
         "cwd": cwd,
         "pending_text": pending_text,
         "thread_ts": thread_ts,
@@ -115,15 +146,7 @@ def build_session_picker(
         {"type": "section", "text": {"type": "mrkdwn", "text": header}}
     ]
 
-    for i, session in enumerate(sessions):
-        short_id = session.session_id[:8]
-        try:
-            mtime = time.strftime(
-                "%m-%d %H:%M",
-                time.localtime(os.path.getmtime(session.file_path)),
-            )
-        except (OSError, AttributeError):
-            mtime = "?"
+    for i, session in enumerate(displayed):
         blocks.append(
             {
                 "type": "actions",
@@ -132,7 +155,7 @@ def build_session_picker(
                         "type": "button",
                         "text": {
                             "type": "plain_text",
-                            "text": f"\u25b6 {short_id} ({mtime})",
+                            "text": _session_button_label(session),
                         },
                         "action_id": f"{ACTION_SESS_SELECT}{i}",
                     }
@@ -140,25 +163,36 @@ def build_session_picker(
             }
         )
 
-    blocks.append(
+    controls: list[dict[str, Any]] = [
         {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "\u2728 New session"},
-                    "action_id": ACTION_SESS_NEW,
-                    "style": "primary",
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Cancel"},
-                    "action_id": ACTION_SESS_CANCEL,
-                    "style": "danger",
-                },
-            ],
-        }
-    )
+            "type": "button",
+            "text": {"type": "plain_text", "text": "\u2728 New session"},
+            "action_id": ACTION_SESS_NEW,
+            "style": "primary",
+        },
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Cancel"},
+            "action_id": ACTION_SESS_CANCEL,
+            "style": "danger",
+        },
+    ]
+    # Offer the -p filter only when there's something to filter.
+    if any(s.is_sdk for s in sessions):
+        toggle_text = (
+            "\U0001f441 \u986f\u793a\u5168\u90e8"  # \ud83d\udc41 \u986f\u793a\u5168\u90e8
+            if hide_sdk
+            else "\U0001f648 \u96b1\u85cf -p"  # \ud83d\ude48 \u96b1\u85cf -p
+        )
+        controls.insert(
+            0,
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": toggle_text},
+                "action_id": ACTION_SESS_TOGGLE_SDK,
+            },
+        )
+    blocks.append({"type": "actions", "elements": controls})
 
     return {"text": "Resume session or start new?", "blocks": blocks}
 
@@ -366,3 +400,25 @@ async def create_session_for_thread(
         window_name,
     )
     return window_id
+
+
+async def bind_thread_to_existing_window(
+    user_id: str, thread_ts: str, window_id: str
+) -> bool:
+    """Attach a thread to an already-running window (no new window / resume).
+
+    Used when the picked session is live: binding to its existing window avoids
+    spawning a duplicate window for the same session. Returns True on success.
+    """
+    window = await tmux_manager.find_window_by_id(window_id)
+    if not window:
+        return False
+    session_manager.bind_thread(user_id, thread_ts, window_id, window.window_name)
+    logger.info(
+        "Attached thread %s to running window %s (%s) for user %s",
+        thread_ts,
+        window_id,
+        window.window_name,
+        user_id,
+    )
+    return True

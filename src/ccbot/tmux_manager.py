@@ -169,6 +169,42 @@ class TmuxManager:
         logger.debug("Window not found by id: %s", window_id)
         return None
 
+    async def window_exists(self, window_id: str) -> bool | None:
+        """Definitively check whether a window still exists.
+
+        Unlike find_window_by_id (which collapses every failure to None), this
+        distinguishes "genuinely gone" from "couldn't tell":
+
+          - True  → the window is present.
+          - False → the session/window is genuinely absent (ObjectDoesNotExist).
+          - None  → the tmux query itself failed (server busy, subprocess error,
+                    grouped-session ambiguity). Caller must NOT treat this as
+                    "gone" — doing so unbinds live threads on a transient blip.
+
+        This is the guard callers use before unbinding a thread; find_window_by_id
+        stays a plain lookup for the common "get the window or skip" case.
+        """
+
+        def _sync() -> bool | None:
+            try:
+                session = self.server.sessions.get(session_name=self.session_name)
+            except Exception as e:
+                # libtmux raises ObjectDoesNotExist (a private class we avoid
+                # importing) only when the session is genuinely absent → window
+                # is gone. Any other error is a transient/ambiguous query
+                # failure and must NOT be read as "gone".
+                if type(e).__name__ == "ObjectDoesNotExist":
+                    return False
+                return None
+            if session is None:
+                return False
+            try:
+                return any(w.window_id == window_id for w in session.windows)
+            except Exception:
+                return None
+
+        return await asyncio.to_thread(_sync)
+
     async def capture_pane(self, window_id: str, with_ansi: bool = False) -> str | None:
         """Capture the visible text content of a window's active pane.
 

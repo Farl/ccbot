@@ -24,6 +24,7 @@ Key methods for thread binding access:
 import asyncio
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +85,27 @@ class ClaudeSession:
     summary: str
     message_count: int
     file_path: str
+    # True when the session was produced by `claude -p` / the SDK (headless,
+    # e.g. cron jobs) rather than typed interactively. Detected from the first
+    # user message's entrypoint/promptSource. Used by the picker to optionally
+    # hide automation noise.
+    is_sdk: bool = False
+    # True when this session is currently live in a tmux window (the one the
+    # user is most likely trying to bind to). Marked "running" in the picker.
+    is_running: bool = False
+
+
+# Entrypoint identifying a `claude -p` / SDK (headless) session, read from the
+# first user message. We key ONLY on entrypoint == "sdk-cli": interactive
+# clients (terminal "cli", "claude-vscode") also carry promptSource == "sdk", so
+# keying on promptSource would wrongly tag real interactive sessions as -p and
+# hide them behind the toggle. Unknown/missing entrypoint → treated interactive.
+_SDK_ENTRYPOINT = "sdk-cli"
+
+
+def _is_sdk_entry(data: dict[str, Any]) -> bool:
+    """True if a transcript user-message entry came from `claude -p` / the SDK."""
+    return data.get("entrypoint") == _SDK_ENTRYPOINT
 
 
 @dataclass
@@ -655,6 +677,7 @@ class SessionManager:
         summary = ""
         last_user_msg = ""
         message_count = 0
+        is_sdk = False
         try:
             async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
                 async for line in f:
@@ -671,6 +694,7 @@ class SessionManager:
                                 summary = s
                         # Track last user message as fallback
                         elif TranscriptParser.is_user_message(data):
+                            is_sdk = is_sdk or _is_sdk_entry(data)
                             parsed = TranscriptParser.parse_message(data)
                             if parsed and parsed.text.strip():
                                 last_user_msg = parsed.text.strip()
@@ -687,43 +711,85 @@ class SessionManager:
             summary=summary,
             message_count=message_count,
             file_path=str(file_path),
+            is_sdk=is_sdk,
         )
 
     # --- Directory session listing ---
+
+    async def _running_session_ids_for_cwd(self, cwd: str) -> set[str]:
+        """Session IDs currently live in a tmux window for this cwd.
+
+        Cross-references persisted window_states (window → session_id + cwd)
+        with the live tmux window list, so a session that has been closed no
+        longer counts as running.
+        """
+        target = cwd.rstrip("/")
+        # list_windows() already returns [] on any tmux error, so a transient
+        # failure just yields no "running" marks (harmless) rather than raising.
+        live = {w.window_id for w in await tmux_manager.list_windows()}
+        return {
+            st.session_id
+            for wid, st in self.window_states.items()
+            if wid in live and st.session_id and st.cwd.rstrip("/") == target
+        }
 
     async def list_sessions_for_directory(self, cwd: str) -> list[ClaudeSession]:
         """List existing Claude sessions for a directory.
 
         Encodes the cwd path to find the project directory under
-        ~/.claude/projects/{encoded_cwd}/, globs *.jsonl files, and
-        extracts summary info from each.
+        ~/.claude/projects/{encoded_cwd}/, globs *.jsonl files, and extracts
+        summary info from each.
 
-        Returns a list sorted by mtime (most recent first), capped at 10.
+        Sessions currently live in a tmux window (``is_running``) are always
+        surfaced and sorted first — even if recent ``claude -p`` runs would push
+        them past the mtime cap — since the running session is the one the user
+        is most likely trying to bind. The remaining slots (up to 10) are filled
+        by other sessions, newest first. SDK/``-p`` sessions are flagged
+        (``is_sdk``) but never dropped here; hiding them is a picker-side choice.
         """
         encoded_cwd = self._encode_cwd(cwd)
         project_dir = config.claude_projects_path / encoded_cwd
         if not project_dir.is_dir():
             return []
 
-        # Collect JSONL files sorted by mtime (newest first)
+        running_ids = await self._running_session_ids_for_cwd(cwd)
+
+        def _mtime(session: ClaudeSession) -> float:
+            try:
+                return os.path.getmtime(session.file_path)
+            except OSError:
+                return 0.0
+
+        # 1) Running sessions first — resolved directly by id, so an old idle
+        #    session is never buried by the mtime cap below. A live session is
+        #    shown even with an empty transcript (a brand-new session whose
+        #    first turn hasn't flushed yet) so the user can always reconnect.
+        running: list[ClaudeSession] = []
+        for sid in running_ids:
+            s = await self._get_session_direct(sid, cwd)
+            if s:
+                s.is_running = True
+                running.append(s)
+        running.sort(key=_mtime, reverse=True)
+
+        # 2) Fill the rest by mtime (newest first), skipping the index and any
+        #    running session already collected. Cap the non-running tail at 10.
         jsonl_files = sorted(
             project_dir.glob("*.jsonl"),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
-
-        # Skip sessions-index and cap at 10
-        sessions: list[ClaudeSession] = []
+        others: list[ClaudeSession] = []
         for f in jsonl_files:
-            if f.stem == "sessions-index":
+            if f.stem == "sessions-index" or f.stem in running_ids:
                 continue
-            if len(sessions) >= 10:
+            if len(others) >= 10:
                 break
-            session_id = f.stem
-            session = await self._get_session_direct(session_id, cwd)
+            session = await self._get_session_direct(f.stem, cwd)
             if session and session.message_count > 0:
-                sessions.append(session)
-        return sessions
+                others.append(session)
+
+        return running + others
 
     # --- Window → Session resolution ---
 
@@ -817,6 +883,21 @@ class SessionManager:
             return None
         return bindings.get(thread_id)
 
+    def is_window_bound_elsewhere(
+        self, window_id: str, user_id: str, thread_id: str
+    ) -> bool:
+        """True if window_id is already bound to a thread other than this one.
+
+        Guards the "reconnect to a running session" flow: binding a second
+        thread to the same window would break the 1 window = 1 thread invariant
+        and fan every reply out to both threads. Checks across all users.
+        """
+        for uid, bindings in self.thread_bindings.items():
+            for tid, wid in bindings.items():
+                if wid == window_id and (uid, tid) != (user_id, thread_id):
+                    return True
+        return False
+
     def resolve_window_for_thread(
         self,
         user_id: str,
@@ -829,6 +910,18 @@ class SessionManager:
         if thread_id is None:
             return None
         return self.get_window_for_thread(user_id, thread_id)
+
+    async def window_id_for_session(self, session_id: str) -> str | None:
+        """The live tmux window currently running a given session, if any.
+
+        Used to attach a thread to an already-running session's window instead
+        of resuming it into a duplicate window. Only live windows count.
+        """
+        live = {w.window_id for w in await tmux_manager.list_windows()}
+        for wid, st in self.window_states.items():
+            if wid in live and st.session_id == session_id:
+                return wid
+        return None
 
     def iter_thread_bindings(self) -> Iterator[tuple[str, str, str]]:
         """Iterate all thread bindings as (user_id, thread_id, window_id).

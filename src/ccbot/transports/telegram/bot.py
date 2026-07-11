@@ -79,6 +79,7 @@ from .handlers.callback_data import (
     CB_SESSION_CANCEL,
     CB_SESSION_NEW,
     CB_SESSION_SELECT,
+    CB_SESSION_TOGGLE,
     CB_KEYS_PREFIX,
     CB_SCREENSHOT_REFRESH,
     CB_WIN_BIND,
@@ -89,6 +90,8 @@ from .handlers.directory_browser import (
     BROWSE_DIRS_KEY,
     BROWSE_PAGE_KEY,
     BROWSE_PATH_KEY,
+    HIDE_SDK_KEY,
+    SESSIONS_ALL_KEY,
     SESSIONS_KEY,
     STATE_BROWSING_DIRECTORY,
     STATE_KEY,
@@ -101,6 +104,7 @@ from .handlers.directory_browser import (
     clear_browse_state,
     clear_session_picker_state,
     clear_window_picker_state,
+    visible_sessions,
 )
 from .handlers.cleanup import clear_topic_state
 from .handlers.history import send_history
@@ -1095,6 +1099,50 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # --- Window creation helper ---
 
 
+async def _reattach_thread_to_window(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    pending_thread_id: int | None,
+    window_id: str,
+) -> bool:
+    """Bind a topic to an already-running window and forward any pending text.
+
+    Used when the picked session is live, so we attach to its existing window
+    instead of resuming a duplicate. Returns True on success.
+    """
+    if pending_thread_id is None:
+        return False
+    window = await tmux_manager.find_window_by_id(window_id)
+    if not window:
+        return False
+    session_manager.bind_thread(
+        str(user_id), str(pending_thread_id), window_id, window_name=window.window_name
+    )
+    pending_text = (
+        context.user_data.get("_pending_thread_text") if context.user_data else None
+    )
+    if pending_text:
+        if context.user_data is not None:
+            context.user_data.pop("_pending_thread_text", None)
+            context.user_data.pop("_pending_thread_id", None)
+        send_ok, send_msg = await session_manager.send_to_window(
+            window_id, pending_text
+        )
+        if not send_ok:
+            # Mirror the resume path: don't silently drop the user's message.
+            logger.warning("Failed to forward pending text on reattach: %s", send_msg)
+            chat_id = session_manager.resolve_chat_id(
+                str(user_id), str(pending_thread_id)
+            )
+            await safe_send(
+                context.bot,
+                chat_id,
+                f"❌ Failed to send pending message: {send_msg}",
+                message_thread_id=pending_thread_id,
+            )
+    return True
+
+
 async def _create_and_bind_window(
     query: object,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1418,10 +1466,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Check for existing sessions in this directory
         sessions = await session_manager.list_sessions_for_directory(selected_path)
         if sessions:
-            # Show session picker — store state for later
+            # Show session picker — store state for later. SESSIONS_KEY holds the
+            # *displayed* list (CB_SESSION_SELECT index space); SESSIONS_ALL_KEY
+            # keeps the full set so the hide/show -p toggle can rebuild.
             if context.user_data is not None:
                 context.user_data[STATE_KEY] = STATE_SELECTING_SESSION
-                context.user_data[SESSIONS_KEY] = sessions
+                context.user_data[SESSIONS_ALL_KEY] = sessions
+                context.user_data[HIDE_SDK_KEY] = False
+                context.user_data[SESSIONS_KEY] = visible_sessions(sessions, False)
                 context.user_data["_selected_path"] = selected_path
             text, keyboard = build_session_picker(sessions)
             await safe_edit(query, text, reply_markup=keyboard)
@@ -1482,6 +1534,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if context.user_data is not None:
             context.user_data.pop("_selected_path", None)
 
+        # Live session → attach to its existing window instead of resuming a
+        # duplicate. Fall back to resume if the window can't be resolved.
+        if session.is_running:
+            existing = await session_manager.window_id_for_session(session.session_id)
+            if existing and session_manager.is_window_bound_elsewhere(
+                existing, str(user.id), str(pending_tid)
+            ):
+                # Already connected to another topic — reattaching would fan
+                # replies to both. Refuse (don't resume a duplicate either).
+                await safe_edit(
+                    query, "⚠️ 此 session 已連接到另一個對話，無法重複連接。"
+                )
+                await query.answer()
+                return
+            if existing and await _reattach_thread_to_window(
+                context, user.id, pending_tid, existing
+            ):
+                await safe_edit(
+                    query,
+                    f"✅ Reconnected to session {session.session_id[:8]}. "
+                    "Send messages here.",
+                )
+                await query.answer()
+                return
+
         await _create_and_bind_window(
             query,
             context,
@@ -1510,6 +1587,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             context.user_data.pop("_selected_path", None)
 
         await _create_and_bind_window(query, context, user, selected_path, pending_tid)
+
+    elif data == CB_SESSION_TOGGLE:
+        # Flip the hide-`-p` filter and re-render in place.
+        if context.user_data is not None:
+            all_sessions = context.user_data.get(SESSIONS_ALL_KEY, [])
+            hide_sdk = not context.user_data.get(HIDE_SDK_KEY, False)
+            context.user_data[HIDE_SDK_KEY] = hide_sdk
+            context.user_data[SESSIONS_KEY] = visible_sessions(all_sessions, hide_sdk)
+            text, keyboard = build_session_picker(all_sessions, hide_sdk=hide_sdk)
+            await safe_edit(query, text, reply_markup=keyboard)
+        await query.answer()
 
     elif data == CB_SESSION_CANCEL:
         pending_tid = (

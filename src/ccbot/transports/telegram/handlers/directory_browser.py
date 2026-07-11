@@ -32,6 +32,7 @@ from .callback_data import (
     CB_SESSION_CANCEL,
     CB_SESSION_NEW,
     CB_SESSION_SELECT,
+    CB_SESSION_TOGGLE,
     CB_WIN_BIND,
     CB_WIN_CANCEL,
     CB_WIN_NEW,
@@ -50,7 +51,9 @@ BROWSE_PAGE_KEY = "browse_page"
 BROWSE_DIRS_KEY = "browse_dirs"  # Cache of subdirs for current path
 UNBOUND_WINDOWS_KEY = "unbound_windows"  # Cache of (name, cwd) tuples
 STATE_SELECTING_SESSION = "selecting_session"
-SESSIONS_KEY = "cached_sessions"  # Cache of ClaudeSession list
+SESSIONS_KEY = "cached_sessions"  # Cache of displayed ClaudeSession list (index space)
+SESSIONS_ALL_KEY = "cached_sessions_all"  # Full list (for hide/show -p toggle)
+HIDE_SDK_KEY = "sessions_hide_sdk"  # Current hide-`-p` filter state
 
 
 def clear_browse_state(user_data: dict | None) -> None:
@@ -74,6 +77,15 @@ def clear_session_picker_state(user_data: dict | None) -> None:
     if user_data is not None:
         user_data.pop(STATE_KEY, None)
         user_data.pop(SESSIONS_KEY, None)
+        user_data.pop(SESSIONS_ALL_KEY, None)
+        user_data.pop(HIDE_SDK_KEY, None)
+
+
+def visible_sessions(
+    sessions: list[ClaudeSession], hide_sdk: bool
+) -> list[ClaudeSession]:
+    """Filter out SDK/`-p` sessions when hide_sdk is set."""
+    return [s for s in sessions if not (hide_sdk and s.is_sdk)]
 
 
 def build_window_picker(
@@ -216,36 +228,57 @@ def _relative_time(file_path: str) -> str:
 
 def build_session_picker(
     sessions: list[ClaudeSession],
+    hide_sdk: bool = False,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Build session picker UI for resuming an existing Claude session.
 
-    Args:
-        sessions: List of ClaudeSession objects (sorted by recency).
+    Running sessions (currently live in a tmux window) are marked "🟢 執行中"
+    and listed first by the data layer. SDK / ``claude -p`` sessions are tagged
+    ``[-p]``; a toggle button hides/shows them (never hidden by default).
 
-    Returns: (text, keyboard).
+    Args:
+        sessions: Full ClaudeSession list (running first, then by recency).
+        hide_sdk: When True, ``-p`` sessions are omitted from the display.
+
+    Returns: (text, keyboard). The displayed subset (== index space for
+    CB_SESSION_SELECT) is ``visible_sessions(sessions, hide_sdk)`` — the caller
+    must cache that same list.
     """
+    displayed = visible_sessions(sessions, hide_sdk)
     lines = [
         "*Resume Session?*\n",
         "Existing sessions found in this directory.\n",
     ]
-    for i, s in enumerate(sessions):
+    for i, s in enumerate(displayed):
         summary = s.summary[:40] + "…" if len(s.summary) > 40 else s.summary
         rel = _relative_time(s.file_path)
         time_str = f" ({rel})" if rel else ""
-        lines.append(f"{i + 1}. {summary} — {s.message_count} msgs{time_str}")
+        mark = "🟢 執行中 " if s.is_running else ""
+        tag = " [-p]" if s.is_sdk else ""
+        lines.append(
+            f"{i + 1}. {mark}{summary} — {s.message_count} msgs{time_str}{tag}"
+        )
 
     buttons: list[list[InlineKeyboardButton]] = []
-    for i in range(0, len(sessions), 2):
+    for i in range(0, len(displayed), 2):
         row = []
-        for j in range(min(2, len(sessions) - i)):
-            s = sessions[i + j]
-            label = s.summary[:14] + "…" if len(s.summary) > 14 else s.summary
+        for j in range(min(2, len(displayed) - i)):
+            s = displayed[i + j]
+            # Include a summary snippet even for running sessions so multiple
+            # live sessions don't render as identical "🟢 執行中" buttons.
+            snippet = s.summary[:12] + "…" if len(s.summary) > 12 else s.summary
+            label = f"🟢 {snippet}" if s.is_running else f"▶ {snippet}"
             row.append(
-                InlineKeyboardButton(
-                    f"▶ {label}", callback_data=f"{CB_SESSION_SELECT}{i + j}"
-                )
+                InlineKeyboardButton(label, callback_data=f"{CB_SESSION_SELECT}{i + j}")
             )
         buttons.append(row)
+
+    # Offer the -p filter only when there's something to filter.
+    if any(s.is_sdk for s in sessions):
+        toggle_label = "👁 顯示全部" if hide_sdk else "🙈 隱藏 -p"
+        buttons.append(
+            [InlineKeyboardButton(toggle_label, callback_data=CB_SESSION_TOGGLE)]
+        )
 
     buttons.append(
         [

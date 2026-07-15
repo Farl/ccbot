@@ -1885,6 +1885,12 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         if get_interactive_msg_id(user_id, thread_id):
             await clear_interactive_msg(user_id, bot, thread_id)
 
+        # Silent mode is per bound window: drop the noise (thinking/tool/user
+        # echo), keep replies. Placed after interactive handling so permission/
+        # plan prompts still surface even in a silenced window.
+        if msg.is_noise and session_manager.is_silent(wid):
+            continue
+
         # Skip tool call notifications when CCBOT_SHOW_TOOL_CALLS=false
         if not config.show_tool_calls and msg.content_type in (
             "tool_use",

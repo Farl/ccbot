@@ -13,6 +13,7 @@ Key state:
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 
@@ -34,6 +35,19 @@ logger = logging.getLogger(__name__)
 
 STATUS_POLL_INTERVAL = 1.0  # seconds
 
+# Idle polls to hold the native "thinking" status before clearing it. The
+# trailing reply is delivered by the session monitor (config.monitor_poll_interval,
+# ~2s) plus queue latency, whereas this loop detects an idle pane within one
+# STATUS_POLL_INTERVAL (~1s). Clearing on the first idle poll makes the indicator
+# blink out a beat before the last message lands. Holding a few extra idle polls
+# lets that message post first — Slack auto-clears the status on any posted
+# message — so the indicator and the final message hand off together; only when
+# NO trailing message arrives do we clear ourselves after the grace. Derived from
+# the monitor cadence so it adapts if that interval changes.
+STATUS_CLEAR_GRACE_POLLS = (
+    math.ceil(config.monitor_poll_interval / STATUS_POLL_INTERVAL) + 2
+)
+
 # Seconds to suppress new interactive UI after the last session monitor delivery.
 # Gives the session monitor time to flush all pending tool/response messages first.
 _CONTENT_SETTLE_TIME = 3.0
@@ -43,6 +57,11 @@ _last_content_time: dict[tuple[str, str], float] = {}
 
 # (user_id, thread_ts) -> last text passed to setStatus (dedups clears only)
 _last_thread_status: dict[tuple[str, str], str] = {}
+
+# (user_id, thread_ts) -> consecutive idle polls seen while the pane has no
+# active status; gates the delayed clear so the indicator doesn't vanish before
+# the trailing message is delivered.
+_status_clear_grace: dict[tuple[str, str], int] = {}
 
 # Callback set by start_status_polling; signature: (channel, thread_ts, text) -> None
 _set_thread_status: Callable[[str, str, str], Awaitable[None]] | None = None
@@ -72,6 +91,40 @@ async def _sync_thread_status(
         return  # already cleared — skip redundant clear
     _last_thread_status[key] = text
     await _set_thread_status(channel, thread_ts, text)
+
+
+# Marker stored by mark_status_active. Only the emptiness of a cache entry is
+# ever read (the clear-dedup in _sync_thread_status fires solely when the entry
+# reads ""), so any non-empty value works — it need NOT match the text handed to
+# the framework's set_status().
+_ACTIVE_MARKER = "…"
+
+
+def mark_status_active(user_id: str, thread_ts: str) -> None:
+    """Record that a native thread status was set OUTSIDE this module.
+
+    The assistant handler sets the initial indicator via the Slack framework's
+    set_status(), which hits the API directly and bypasses `_sync_thread_status`,
+    leaving the `_last_thread_status` cache stale. If the cache still reads ""
+    (from the prior interaction's clear), the poller's idle clear gets deduped and
+    the indicator sticks forever — visible after a bare `/clear`, which posts no
+    reply for Slack to auto-clear on. Marking the entry non-empty keeps the cache
+    truthful so that clear is not falsely deduped.
+    """
+    _last_thread_status[(user_id, thread_ts)] = _ACTIVE_MARKER
+
+
+def forget_thread(user_id: str, thread_ts: str) -> None:
+    """Drop all per-thread status tracking.
+
+    Used by the poller teardown on unbind, and by the assistant handler when a
+    thread ends without ever binding a session — the poller only reclaims entries
+    for bound threads, so an unbound thread's seeded marker would otherwise leak.
+    """
+    key = (user_id, thread_ts)
+    _last_content_time.pop(key, None)
+    _last_thread_status.pop(key, None)
+    _status_clear_grace.pop(key, None)
 
 
 def record_content_delivery(user_id: str, thread_ts: str) -> None:
@@ -144,15 +197,31 @@ async def update_status_for_window(
         return
 
     status_line = parse_status_line(pane_text)
-    if (
-        not status_line
-        or not config.show_status
-        or session_manager.is_silent(window_id)
-    ):
-        # No active status, indicator disabled, or window silenced — clear the
-        # native thread status (Claude may also have exited).
+    if not config.show_status:
+        # Indicator disabled by config — clear immediately, no grace.
         await clear_status(user_id, thread_ts, channel)
         return
+    if not status_line:
+        # Idle pane. Don't clear on the first idle poll: the trailing reply is
+        # delivered by the slower session monitor (see STATUS_CLEAR_GRACE_POLLS),
+        # so clearing now would blink the indicator out just before that message
+        # lands. Hold for a few idle polls — the message posts within that window
+        # and Slack auto-clears the status on post, a seamless hand-off. Only if
+        # no message arrives do we clear ourselves once the grace elapses.
+        miss = _status_clear_grace.get(ikey, 0) + 1
+        _status_clear_grace[ikey] = miss
+        if miss < STATUS_CLEAR_GRACE_POLLS:
+            return
+        await clear_status(user_id, thread_ts, channel)
+        return
+
+    # Active status — reset the idle grace so the next idle starts fresh.
+    _status_clear_grace.pop(ikey, None)
+
+    # NOTE: silent mode does NOT suppress this indicator. It's a lightweight
+    # native status (not a chat message), and while silent hides the noisy
+    # thinking/tool messages, the "still working…" indicator is exactly the
+    # quiet signal the user relies on to see the session is alive.
 
     # Slack's native assistant thread status is the SOLE thinking indicator.
     # We deliberately never post "Thinking…/Ideating…" as a chat message: it
@@ -173,6 +242,7 @@ async def clear_status(
     Full per-thread teardown on unbind happens in the polling loop.
     """
     _last_content_time.pop((user_id, thread_ts), None)
+    _status_clear_grace.pop((user_id, thread_ts), None)
     await _sync_thread_status(user_id, thread_ts, channel, "")
 
 
@@ -198,10 +268,7 @@ async def start_status_polling(
                         continue  # can't tell right now — keep binding, retry next tick
                     if not exists:
                         session_manager.unbind_thread(uid, tid)
-                        # Clean up in-memory tracking dicts for this thread
-                        key = (uid, tid)
-                        _last_content_time.pop(key, None)
-                        _last_thread_status.pop(key, None)
+                        forget_thread(uid, tid)  # drop in-memory tracking
                         logger.info(
                             "Cleaned up stale binding: user=%s thread=%s window_id=%s",
                             uid,

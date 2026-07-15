@@ -49,7 +49,12 @@ from .handlers.message_queue import (
     shutdown_workers,
 )
 from .handlers.message_sender import send_message
-from .handlers.status_polling import record_content_delivery, start_status_polling
+from .handlers.status_polling import (
+    forget_thread,
+    mark_status_active,
+    record_content_delivery,
+    start_status_polling,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -337,14 +342,22 @@ def _register_handlers(slack_app: AsyncApp) -> None:
             # (prevents "No response requested." auto-reply).
             # The status polling loop will update/clear this as Claude works.
             await set_status("…")
+            # set_status() writes the native indicator directly, bypassing the
+            # poller's dedup cache; mark it so the poller's idle clear isn't
+            # deduped away — otherwise a bare /clear (which posts no reply) leaves
+            # the indicator stuck forever.
+            mark_status_active(user_id, thread_ts)
             await _dispatch_incoming(
                 user_id, channel, thread_ts, text, files, client, say
             )
         finally:
             _assistant_processing.discard(thread_ts)
-            # If no session was bound, polling won't clear status — do it here
+            # If no session was bound, the poller won't manage this thread: clear
+            # the native indicator and drop the cache entry we just seeded (the
+            # poller only reclaims entries for bound threads, so it would leak).
             if not session_manager.resolve_window_for_thread(user_id, thread_ts):
                 await _set_thread_status(channel, thread_ts, "")
+                forget_thread(user_id, thread_ts)
 
     slack_app.assistant(assistant)
 
@@ -939,6 +952,10 @@ async def handle_new_message(msg: NewMessage) -> None:
     """Session monitor callback — deliver Claude messages to Slack threads."""
     users = await session_manager.find_users_for_session(msg.session_id)
     for user_id, window_id, thread_id in users:
+        # Silent mode is per bound window: drop the noise (thinking/tool/user
+        # echo) here, where we know the exact target window, and keep replies.
+        if msg.is_noise and session_manager.is_silent(window_id):
+            continue
         channel = await _resolve_dm_channel(user_id)
         if not channel:
             continue

@@ -70,6 +70,47 @@ class TestSyncThreadStatus:
         assert cb.await_count == 2
         cb.assert_awaited_with("C1", "ts1", "")
 
+    @pytest.mark.asyncio
+    async def test_clear_after_out_of_band_status_is_not_deduped(self):
+        """A native status set OUTSIDE the poller (the assistant handler's initial
+        set_status("…")) must be clearable.
+
+        Repro of the `/clear` stuck-status bug: after a prior interaction the
+        cache holds "" (last thing the poller did was clear). The assistant
+        handler then sets the native "…" indicator directly. If that write isn't
+        recorded via mark_status_active, the cache still says "" and the poller's
+        idle clear is deduped away — leaving "…" stuck forever (a bare /clear
+        posts no reply, so Slack never auto-clears it either).
+        """
+        cb = AsyncMock()
+        sp._set_thread_status = cb
+
+        # Prior interaction ended with a clear: cache == "".
+        await sp._sync_thread_status("U1", "ts1", "C1", "")
+        cb.reset_mock()
+
+        # Assistant handler sets native status out of band; mark it in the cache.
+        sp.mark_status_active("U1", "ts1")
+
+        # Poller detects idle and clears — must actually reach the API.
+        await sp._sync_thread_status("U1", "ts1", "C1", "")
+
+        cb.assert_awaited_once_with("C1", "ts1", "")
+
+    def test_forget_thread_drops_all_tracking(self):
+        """forget_thread reclaims every per-thread entry (leak guard for threads
+        that end without ever binding a session)."""
+        key = ("U1", "ts1")
+        sp.mark_status_active("U1", "ts1")
+        sp._last_content_time[key] = 1.0
+        sp._status_clear_grace[key] = 2
+
+        sp.forget_thread("U1", "ts1")
+
+        assert key not in sp._last_thread_status
+        assert key not in sp._last_content_time
+        assert key not in sp._status_clear_grace
+
 
 @pytest.mark.usefixtures("_reset_status_state")
 class TestStatusShownAsNativeOnly:

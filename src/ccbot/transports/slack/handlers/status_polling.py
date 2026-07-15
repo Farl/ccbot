@@ -93,6 +93,40 @@ async def _sync_thread_status(
     await _set_thread_status(channel, thread_ts, text)
 
 
+# Marker stored by mark_status_active. Only the emptiness of a cache entry is
+# ever read (the clear-dedup in _sync_thread_status fires solely when the entry
+# reads ""), so any non-empty value works — it need NOT match the text handed to
+# the framework's set_status().
+_ACTIVE_MARKER = "…"
+
+
+def mark_status_active(user_id: str, thread_ts: str) -> None:
+    """Record that a native thread status was set OUTSIDE this module.
+
+    The assistant handler sets the initial indicator via the Slack framework's
+    set_status(), which hits the API directly and bypasses `_sync_thread_status`,
+    leaving the `_last_thread_status` cache stale. If the cache still reads ""
+    (from the prior interaction's clear), the poller's idle clear gets deduped and
+    the indicator sticks forever — visible after a bare `/clear`, which posts no
+    reply for Slack to auto-clear on. Marking the entry non-empty keeps the cache
+    truthful so that clear is not falsely deduped.
+    """
+    _last_thread_status[(user_id, thread_ts)] = _ACTIVE_MARKER
+
+
+def forget_thread(user_id: str, thread_ts: str) -> None:
+    """Drop all per-thread status tracking.
+
+    Used by the poller teardown on unbind, and by the assistant handler when a
+    thread ends without ever binding a session — the poller only reclaims entries
+    for bound threads, so an unbound thread's seeded marker would otherwise leak.
+    """
+    key = (user_id, thread_ts)
+    _last_content_time.pop(key, None)
+    _last_thread_status.pop(key, None)
+    _status_clear_grace.pop(key, None)
+
+
 def record_content_delivery(user_id: str, thread_ts: str) -> None:
     """Called by handle_new_message to signal content was just delivered."""
     _last_content_time[(user_id, thread_ts)] = time.monotonic()
@@ -234,11 +268,7 @@ async def start_status_polling(
                         continue  # can't tell right now — keep binding, retry next tick
                     if not exists:
                         session_manager.unbind_thread(uid, tid)
-                        # Clean up in-memory tracking dicts for this thread
-                        key = (uid, tid)
-                        _last_content_time.pop(key, None)
-                        _last_thread_status.pop(key, None)
-                        _status_clear_grace.pop(key, None)
+                        forget_thread(uid, tid)  # drop in-memory tracking
                         logger.info(
                             "Cleaned up stale binding: user=%s thread=%s window_id=%s",
                             uid,

@@ -16,22 +16,18 @@ from pathlib import Path
 
 def main() -> None:
     """Main entry point."""
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "hook":
-            from .hook import hook_main
+    # `ccbot hook` is a subcommand with its own args, handled before argparse.
+    if len(sys.argv) > 1 and sys.argv[1] == "hook":
+        from .hook import hook_main
 
-            hook_main()
-            return
-        # Reject anything else: silently falling through to "start the bot"
-        # means a typo (or `ccbot --help`) launches a second bot instance
-        # that races the real one for Telegram updates.
-        usage = "Usage: ccbot        start the Telegram bot\n       ccbot hook   run as Claude Code SessionStart hook"
-        if sys.argv[1] in ("-h", "--help"):
-            print(usage)
-            return
-        print(f"Unknown argument: {sys.argv[1]}\n{usage}", file=sys.stderr)
-        sys.exit(2)
+        hook_main()
+        return
 
+    # argparse validates --transport choices and rejects any unknown argument
+    # (exit 2). This is what stops a typo (or `--help`) from silently falling
+    # through to "start the bot" and launching a second instance that races the
+    # real one for updates — the guard upstream added for its Telegram-only CLI,
+    # here provided by argparse's own strictness so our --transport flag works.
     parser = argparse.ArgumentParser(description="CCBot - Claude Code Bot")
     parser.add_argument(
         "--transport",

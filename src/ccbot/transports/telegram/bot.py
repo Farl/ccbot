@@ -1184,6 +1184,9 @@ async def _create_and_bind_window(
         # --resume creates a new session_id in the hook, but messages continue
         # writing to the resumed session's JSONL file. Override window_state to
         # track the original session_id so the monitor can route messages back.
+        # We also force session_map.json (below), because session_map drives the
+        # monitor's watch list and load_session_map() would revert a
+        # window_state-only override on the next poll cycle.
         if resume_session_id:
             ws = session_manager.get_window_state(created_wid)
             if not hook_ok:
@@ -1209,6 +1212,12 @@ async def _create_and_bind_window(
                 )
                 ws.session_id = resume_session_id
                 session_manager._save_state()
+            await session_manager.override_session_map_entry(
+                created_wid,
+                resume_session_id,
+                cwd=str(selected_path),
+                window_name=created_wname,
+            )
 
         if pending_thread_id is not None:
             # Thread bind flow: bind thread to newly created window

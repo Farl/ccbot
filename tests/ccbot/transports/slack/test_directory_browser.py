@@ -125,3 +125,47 @@ def test_no_toggle_when_no_sdk_sessions():
     sessions = [_make_session("inter001"), _make_session("inter002")]
     labels = _button_labels(build_session_picker("U1", sessions, msg_ts="T1"))
     assert not any("-p" in lbl for lbl in labels)
+
+
+def test_resume_forces_session_map_override(monkeypatch):
+    """On --resume, create_session_for_thread must force session_map.json, not
+    just window_state — session_map drives the monitor's watch list and
+    load_session_map() would otherwise revert a window_state-only override on
+    the next poll cycle (mirrors the Telegram-side upstream fix).
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from ccbot.session import session_manager
+    from ccbot.tmux_manager import tmux_manager
+    from ccbot.transports.slack.handlers import directory_browser
+
+    resume_id = "11111111-2222-3333-4444-555555555555"
+
+    monkeypatch.setattr(
+        tmux_manager,
+        "create_window",
+        AsyncMock(return_value=(True, "ok", "proj", "@7")),
+    )
+    monkeypatch.setattr(session_manager, "bind_thread", MagicMock())
+    # Hook fired but reported a different (post-resume) session_id.
+    monkeypatch.setattr(
+        session_manager, "wait_for_session_map_entry", AsyncMock(return_value=True)
+    )
+    ws = MagicMock()
+    ws.session_id = "post-resume-different-id"
+    monkeypatch.setattr(session_manager, "get_window_state", MagicMock(return_value=ws))
+    monkeypatch.setattr(session_manager, "_save_state", MagicMock())
+    override = AsyncMock()
+    monkeypatch.setattr(session_manager, "override_session_map_entry", override)
+
+    window_id = asyncio.run(
+        directory_browser.create_session_for_thread(
+            "U1", "T1", "/tmp/proj", resume_session_id=resume_id
+        )
+    )
+
+    assert window_id == "@7"
+    override.assert_awaited_once_with(
+        "@7", resume_id, cwd="/tmp/proj", window_name="proj"
+    )

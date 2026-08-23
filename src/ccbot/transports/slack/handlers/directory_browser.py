@@ -349,7 +349,10 @@ async def create_session_for_thread(
     When resume_session_id is set, passes --resume to Claude Code. The hook
     will report a new session_id, but messages continue writing to the
     original JSONL file. We override window_state to track the original
-    session_id so the session monitor routes messages back correctly.
+    session_id so the session monitor routes messages back correctly. We also
+    force session_map.json (via override_session_map_entry), because session_map
+    drives the monitor's watch list and load_session_map() would revert a
+    window_state-only override on the next poll cycle.
 
     Returns the window_id on success, None on failure.
     """
@@ -390,6 +393,12 @@ async def create_session_for_thread(
             )
             ws.session_id = resume_session_id
             session_manager._save_state()
+        await session_manager.override_session_map_entry(
+            window_id,
+            resume_session_id,
+            cwd=directory,
+            window_name=window_name,
+        )
 
     logger.info(
         "Session %s: user=%s, thread=%s, window=%s (%s)",

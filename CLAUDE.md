@@ -85,6 +85,19 @@ Or manually in `~/.claude/settings.json`:
   the two branches were byte-identical we consolidated to main-only (2026-06-28) to drop
   the reconcile overhead. The `origin/feat/slack-transport-universal` ref is kept for
   history but no longer maintained; the local branch was deleted.
+- **Upstream is Telegram-only; mirror applicable fixes to the Slack transport.**
+  Upstream `six-ddc/ccbot` has no Slack transport, so every upstream fix to Telegram's
+  delivery/rate-limit/session-mapping path must be checked for a Slack counterpart under
+  `transports/slack/`. Shared modules (`session.py`, `session_monitor.py`, `tmux_manager.py`,
+  `main.py`) benefit both automatically; transport-specific ones do not. Examples applied
+  when syncing `9d7ab97` (2026-08-23): the `--resume` fix that forces `session_map.json`
+  via `override_session_map_entry` (not just `window_state`) was mirrored into
+  `transports/slack/handlers/directory_browser.py`; and because slack_sdk's default client
+  retries connection errors but **not** HTTP 429s, we attached `AsyncRateLimitErrorRetryHandler`
+  to the Bolt app client in `transports/slack/bot.py` as the analog of Telegram's
+  `AIORateLimiter` (Slack previously had no 429 retry, so rate-limited sends silently dropped
+  Claude output). Telegram-only fixes with no Slack analog: MarkdownV2 page-size headroom
+  (`history.py`) and UTF-16 length counting (`telegram_sender.py`) — Slack counts differently.
 - **Topic/thread auto-titling is a Slack-side concern, not Telegram.** Slack assistant
   threads have no user-given name, so Slack titles them via `_set_thread_title`
   (`assistant_threads_setTitle`) in `transports/slack/bot.py` — keep that. Telegram topics

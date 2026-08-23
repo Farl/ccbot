@@ -16,6 +16,9 @@ from typing import Any
 
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp, AsyncAssistant
+from slack_sdk.http_retry.builtin_async_handlers import (
+    AsyncRateLimitErrorRetryHandler,
+)
 
 from ...config import config
 from ...session import session_manager
@@ -65,9 +68,21 @@ _dm_channels: dict[str, str] = {}
 _assistant_processing: set[str] = set()
 
 
+# Slack-native analog of Telegram's AIORateLimiter(max_retries=5): slack_sdk's
+# default AsyncWebClient retries connection errors but NOT HTTP 429s, so a
+# rate-limited chat.postMessage/chat_update would raise and the message queue
+# worker would drop Claude output. AsyncRateLimitErrorRetryHandler honours the
+# Retry-After header and retries the single failing call (no duplication).
+SLACK_RATE_LIMIT_MAX_RETRIES = 5
+
+
 def _create_app() -> AsyncApp:
     """Create the Slack Bolt async app."""
-    return AsyncApp(token=config.slack_bot_token)
+    slack_app = AsyncApp(token=config.slack_bot_token)
+    slack_app.client.retry_handlers.append(
+        AsyncRateLimitErrorRetryHandler(max_retry_count=SLACK_RATE_LIMIT_MAX_RETRIES)
+    )
+    return slack_app
 
 
 _dm_warned_users: set[str] = set()

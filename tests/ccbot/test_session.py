@@ -1,8 +1,12 @@
 """Tests for SessionManager pure dict operations."""
 
+import json
+
 import pytest
 
+import ccbot.session as session_mod
 from ccbot.session import SessionManager
+from ccbot.tmux_manager import TmuxWindow
 
 
 @pytest.fixture
@@ -174,3 +178,186 @@ class TestIsWindowId:
         assert mgr._is_window_id("@") is False
         assert mgr._is_window_id("") is False
         assert mgr._is_window_id("@abc") is False
+
+
+class TestMigrateOldFormatMap:
+    """Pure-function tests for _migrate_old_format_map (session:name -> session:@id)."""
+
+    def test_migrates_name_to_window_id(self, mgr: SessionManager) -> None:
+        session_map = {
+            "ccbot:ccmux": {"session_id": "sid-1", "cwd": "/proj"},
+        }
+        changed = mgr._migrate_old_format_map(session_map, {"ccmux": "@4"})
+        assert changed is True
+        assert "ccbot:ccmux" not in session_map
+        assert session_map["ccbot:@4"] == {
+            "session_id": "sid-1",
+            "cwd": "/proj",
+            "window_name": "ccmux",  # backfilled
+        }
+
+    def test_drops_orphan_without_live_window(self, mgr: SessionManager) -> None:
+        session_map = {"ccbot:gone": {"session_id": "sid-2", "cwd": "/x"}}
+        changed = mgr._migrate_old_format_map(session_map, {})
+        assert changed is True
+        assert session_map == {}
+
+    def test_prefers_existing_window_id_key(self, mgr: SessionManager) -> None:
+        session_map = {
+            "ccbot:ccmux": {"session_id": "old-sid", "cwd": "/proj"},
+            "ccbot:@4": {"session_id": "new-sid", "cwd": "/proj"},
+        }
+        changed = mgr._migrate_old_format_map(session_map, {"ccmux": "@4"})
+        assert changed is True
+        # @id entry wins; old-format key discarded
+        assert session_map == {"ccbot:@4": {"session_id": "new-sid", "cwd": "/proj"}}
+
+    def test_noop_for_window_id_keys(self, mgr: SessionManager) -> None:
+        session_map = {"ccbot:@4": {"session_id": "sid", "cwd": "/proj"}}
+        changed = mgr._migrate_old_format_map(session_map, {"ccmux": "@4"})
+        assert changed is False
+        assert session_map == {"ccbot:@4": {"session_id": "sid", "cwd": "/proj"}}
+
+    def test_ignores_other_tmux_sessions(self, mgr: SessionManager) -> None:
+        # Keys for other tmux sessions (different prefix) are left untouched.
+        session_map = {"0:2.1.76": {"session_id": "sid", "cwd": "/other"}}
+        changed = mgr._migrate_old_format_map(session_map, {"2.1.76": "@9"})
+        assert changed is False
+        assert session_map == {"0:2.1.76": {"session_id": "sid", "cwd": "/other"}}
+
+
+class TestResolveStaleIds:
+    """Regression tests for startup re-resolution after tmux server restart.
+
+    IMPORTANT: window IDs reset when the tmux server restarts; thread
+    bindings MUST survive by re-resolving through display names. A previous
+    bug popped window_display_names entries while migrating window_states,
+    so the thread_bindings loop could no longer resolve the same stale ID
+    and silently dropped every topic binding.
+    """
+
+    def _setup(self, mgr: SessionManager, monkeypatch, tmp_path, live) -> None:
+        async def fake_list_windows() -> list[TmuxWindow]:
+            return live
+
+        monkeypatch.setattr(session_mod.tmux_manager, "list_windows", fake_list_windows)
+        # Point session_map at a nonexistent file so the trailing
+        # session_map cleanup steps are no-ops
+        monkeypatch.setattr(
+            session_mod.config, "session_map_file", tmp_path / "no_map.json"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tmux_restart_remaps_bindings_and_offsets(
+        self, mgr: SessionManager, monkeypatch, tmp_path
+    ) -> None:
+        """All state keyed by a stale window_id follows it to the new id."""
+        state = mgr.get_window_state("@5")
+        state.session_id = "sid-1"
+        state.cwd = "/proj"
+        state.window_name = "proj"
+        mgr.window_display_names["@5"] = "proj"
+        mgr.bind_thread(100, 42, "@5", window_name="proj")
+        mgr.user_window_offsets = {100: {"@5": 123}}
+
+        # tmux restarted: same window name, new id
+        self._setup(mgr, monkeypatch, tmp_path, [TmuxWindow("@1", "proj", "/proj")])
+        await mgr.resolve_stale_ids()
+
+        assert mgr.get_window_for_thread(100, 42) == "@1"
+        assert mgr.window_states["@1"].session_id == "sid-1"
+        assert "@5" not in mgr.window_states
+        assert mgr.user_window_offsets[100] == {"@1": 123}
+        assert mgr.get_display_name("@1") == "proj"
+
+    @pytest.mark.asyncio
+    async def test_binding_without_window_state_still_remaps(
+        self, mgr: SessionManager, monkeypatch, tmp_path
+    ) -> None:
+        """Bindings resolve via display names even with no window_state entry."""
+        mgr.window_display_names["@7"] = "other"
+        mgr.bind_thread(100, 9, "@7", window_name="other")
+
+        self._setup(mgr, monkeypatch, tmp_path, [TmuxWindow("@2", "other", "/o")])
+        await mgr.resolve_stale_ids()
+
+        assert mgr.get_window_for_thread(100, 9) == "@2"
+
+    @pytest.mark.asyncio
+    async def test_unmatched_binding_dropped(
+        self, mgr: SessionManager, monkeypatch, tmp_path
+    ) -> None:
+        """A stale binding with no live window of the same name is dropped."""
+        mgr.window_display_names["@5"] = "gone"
+        mgr.bind_thread(100, 42, "@5", window_name="gone")
+
+        self._setup(mgr, monkeypatch, tmp_path, [TmuxWindow("@1", "unrelated", "/u")])
+        await mgr.resolve_stale_ids()
+
+        assert mgr.get_window_for_thread(100, 42) is None
+
+    @pytest.mark.asyncio
+    async def test_live_ids_untouched(
+        self, mgr: SessionManager, monkeypatch, tmp_path
+    ) -> None:
+        """Bindings pointing at still-live window IDs are kept as-is."""
+        mgr.window_display_names["@3"] = "keep"
+        mgr.bind_thread(100, 7, "@3", window_name="keep")
+        state = mgr.get_window_state("@3")
+        state.session_id = "sid-keep"
+
+        self._setup(mgr, monkeypatch, tmp_path, [TmuxWindow("@3", "keep", "/k")])
+        await mgr.resolve_stale_ids()
+
+        assert mgr.get_window_for_thread(100, 7) == "@3"
+        assert mgr.window_states["@3"].session_id == "sid-keep"
+
+
+class TestLoadSessionMapMigration:
+    """load_session_map self-heals old-format keys at runtime and fills window_states."""
+
+    def _mock_windows(self, monkeypatch, windows: list[TmuxWindow]) -> None:
+        async def fake_list_windows() -> list[TmuxWindow]:
+            return windows
+
+        monkeypatch.setattr(session_mod.tmux_manager, "list_windows", fake_list_windows)
+
+    @pytest.mark.asyncio
+    async def test_old_format_key_populates_window_state(
+        self, mgr: SessionManager, monkeypatch, tmp_path
+    ) -> None:
+        map_file = tmp_path / "session_map.json"
+        map_file.write_text(
+            json.dumps({"ccbot:ccmux": {"session_id": "sid-1", "cwd": "/proj"}})
+        )
+        monkeypatch.setattr(session_mod.config, "session_map_file", map_file)
+        self._mock_windows(monkeypatch, [TmuxWindow("@4", "ccmux", "/proj")])
+
+        await mgr.load_session_map()
+
+        # Delivery path can now resolve @4 -> sid-1
+        state = mgr.get_window_state("@4")
+        assert state.session_id == "sid-1"
+        assert state.cwd == "/proj"
+        # File was rewritten to the @window_id form
+        rewritten = json.loads(map_file.read_text())
+        assert "ccbot:ccmux" not in rewritten
+        assert rewritten["ccbot:@4"]["session_id"] == "sid-1"
+
+    @pytest.mark.asyncio
+    async def test_no_tmux_lookup_when_no_old_keys(
+        self, mgr: SessionManager, monkeypatch, tmp_path
+    ) -> None:
+        map_file = tmp_path / "session_map.json"
+        map_file.write_text(
+            json.dumps({"ccbot:@4": {"session_id": "sid-1", "cwd": "/proj"}})
+        )
+        monkeypatch.setattr(session_mod.config, "session_map_file", map_file)
+
+        async def boom() -> list[TmuxWindow]:
+            raise AssertionError("list_windows should not be called without old keys")
+
+        monkeypatch.setattr(session_mod.tmux_manager, "list_windows", boom)
+
+        await mgr.load_session_map()
+        assert mgr.get_window_state("@4").session_id == "sid-1"
